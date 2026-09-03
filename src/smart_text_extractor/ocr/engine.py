@@ -42,7 +42,16 @@ class OcrEngine:
         if tessdata_dir is not None:
             os.environ["TESSDATA_PREFIX"] = str(tessdata_dir)
 
-    def run(self, image: np.ndarray | Image.Image | Path | str, psm: int = 6) -> OcrResult:
+    def run(self, image: np.ndarray | Image.Image | Path | str, psm: int = 3) -> OcrResult:
+        # psm=3 (fully automatic page segmentation), not 6 (single uniform
+        # block): confirmed against a real multi-section document (title,
+        # subtitle, headings, highlighted box, bulleted body text at
+        # different sizes) that psm=6 badly mis-segments the title/heading
+        # regions entirely (garbage output) while psm=3 reads them
+        # correctly — see docs/phases/phase-2-ocr-pipeline.md. This does
+        # not undo the §7.1.1 multi-column fix: _split_line_into_column_runs
+        # operates on Tesseract's line output regardless of which
+        # auto-segmentation psm produced it.
         # §7.1 step 2 — this was previously skipped entirely: run() sent
         # the raw image straight to Tesseract, so deskew/contrast/denoise
         # existed as tested code that nothing ever actually called.

@@ -45,6 +45,44 @@ def test_deskew_leaves_an_already_level_page_alone() -> None:
     assert abs(_measured_skew_angle(corrected)) < 1.0
 
 
+def _synthetic_structured_document_image() -> np.ndarray:
+    """A level page with a title block, a rule line, and a body paragraph
+    of a different width — shaped like the real document that exposed a
+    genuine bug in the old deskew algorithm (minAreaRect over all ink
+    pixels computed a spurious 8.5° on it, dropping Tesseract's word
+    count from 94 to 22 on an already-level page — see
+    preprocessing.py::_estimate_skew_angle's docstring and
+    docs/phases/phase-2-ocr-pipeline.md for the real numbers).
+
+    Honesty note: this synthetic shape does NOT reproduce that failure —
+    manually confirmed the old minAreaRect code returns ~0° on this exact
+    image too, so whatever in the real document (diacritic scatter and a
+    plain reproduction attempt were both tried and also didn't trigger
+    it) actually caused the spurious estimate remains uncharacterized.
+    This test is a correctness sanity check for the new Hough-based
+    algorithm on a structured layout, not a proven regression test for
+    the old bug — the real evidence for that bug is the measured
+    before/after numbers on the actual document, not this fixture.
+    """
+    img = np.full((500, 800), 255, dtype=np.uint8)
+    # title: short, centered, thick bar (simulates a large-font heading)
+    cv2.rectangle(img, (250, 40), (550, 70), 0, thickness=-1)
+    # a horizontal rule line, as many document templates have
+    cv2.line(img, (50, 110), (750, 110), 0, thickness=2)
+    # body paragraph: full-width lines, much thinner (simulates body text)
+    for y in range(150, 450, 35):
+        cv2.rectangle(img, (50, y), (750, y + 12), 0, thickness=-1)
+    return img
+
+
+def test_deskew_does_not_introduce_spurious_rotation_on_a_structured_document() -> None:
+    """See _synthetic_structured_document_image's docstring: a sanity
+    check for the new algorithm, not a proven regression test."""
+    level_structured = _synthetic_structured_document_image()
+    corrected = deskew(level_structured)
+    assert abs(_measured_skew_angle(corrected)) < 1.0
+
+
 def test_denoise_reduces_variance_of_random_noise() -> None:
     rng = np.random.default_rng(seed=42)
     flat = np.full((200, 200), 200, dtype=np.uint8)

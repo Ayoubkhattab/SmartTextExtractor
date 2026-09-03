@@ -56,11 +56,20 @@ def test_engine_applies_preprocessing_to_a_degraded_image_real_world_regression(
     had been built and tested but never wired in. Manually confirmed: on
     this exact degraded image, the un-preprocessed path returned only 3
     garbage characters ('ا ل ل') instead of the sentence — see
-    docs/phases/phase-2-ocr-pipeline.md for the full before/after."""
+    docs/phases/phase-2-ocr-pipeline.md for the full before/after.
+
+    psm is pinned to 6 explicitly rather than using the engine default:
+    this test's job is proving preprocessing is wired in, not choosing a
+    psm — psm=3 (the engine's default since a later real-document fix)
+    fragments this single short isolated sentence into spurious extra
+    blocks in a way psm=6 doesn't, which is a real difference between
+    "one short synthetic snippet" and "one page of a real document" but
+    not what this specific test is about.
+    """
     text = "مرحباً بكم في مستخرج النص الذكي وهذا اختبار لجودة الاستخراج"
     image = make_degraded_arabic_image(text)
 
-    result = ocr_engine.run(image)
+    result = ocr_engine.run(image, psm=6)
 
     expected_words = ("مرحبا", "بكم", "في", "مستخرج", "النص", "الذكي", "اختبار", "الاستخراج")
     found = sum(word in result.raw_text for word in expected_words)

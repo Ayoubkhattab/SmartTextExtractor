@@ -8,6 +8,7 @@ dependencies = [
     "Pillow>=10.0",
     "opencv-python-headless>=4.9",
     "numpy>=1.26",
+    "PyQt6>=6.7",
 ]
 
 [project.optional-dependencies]
@@ -16,7 +17,7 @@ windows = ["pywin32>=306"]
 # platform, so tests that generate synthetic Arabic images must pre-shape
 # the text themselves. Real scanned pages never need this — their glyphs
 # are already correctly shaped ink on paper.
-dev = ["pytest>=8.0", "arabic-reshaper>=3.0", "python-bidi>=0.4"]
+dev = ["pytest>=8.0", "pytest-qt>=4.4", "arabic-reshaper>=3.0", "python-bidi>=0.4"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

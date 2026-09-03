@@ -10,6 +10,7 @@ from smart_text_extractor.ocr.reorder import (
     _split_line_into_column_runs,
     group_into_lines,
     merge_dual_language_passes,
+    order_lines_reading_order,
     words_from_tsv,
 )
 
@@ -166,3 +167,34 @@ class TestMergeDualLanguagePasses:
         merged = merge_dual_language_passes(primary, arabic_only)
 
         assert merged[0][0].text == "Fro"
+
+
+class TestOrderLinesReadingOrderPerBlock:
+    """Regression test for a real bug (docs/phases/phase-2-ocr-pipeline.md):
+    clustering columns globally across the whole page scrambled reading
+    order whenever a full-width paragraph line's x-range overlapped
+    several narrower columns below it (confirmed real on a page with a
+    3-box side-by-side flow diagram below a full-width paragraph) — they
+    all got lumped into "one column" together. Column clustering must be
+    scoped per Tesseract block, ordering blocks top-to-bottom.
+    """
+
+    def test_narrow_multi_column_row_below_a_full_width_paragraph_orders_correctly(self) -> None:
+        # block 1: one full-width paragraph line spanning nearly the page.
+        paragraph_words = [(BoundingBox("فقرة", Rect(10, 0, 900, 30), 90.0), 1, 0, 1)]
+        # block 2: a single Tesseract "line" that actually spans 3
+        # side-by-side boxes (the same-row-merge bug
+        # _split_line_into_column_runs handles) — words given in the
+        # original, already-correct order Tesseract produces: right box
+        # first, then middle, then left.
+        box_row_words = [
+            (BoundingBox("يمين", Rect(700, 100, 100, 30), 90.0), 2, 0, 1),
+            (BoundingBox("وسط", Rect(400, 100, 100, 30), 90.0), 2, 0, 1),
+            (BoundingBox("يسار", Rect(50, 100, 100, 30), 90.0), 2, 0, 1),
+        ]
+        lines = group_into_lines(paragraph_words + box_row_words)
+
+        ordered = order_lines_reading_order(lines)
+
+        texts = [w.text for line in ordered for w in line.words]
+        assert texts == ["فقرة", "يمين", "وسط", "يسار"]

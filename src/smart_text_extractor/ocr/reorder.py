@@ -206,26 +206,27 @@ def _split_line_into_column_runs(line: Line, gap_multiplier: float = 3.0) -> lis
     return [run for run in runs if run]
 
 
-def order_lines_reading_order(lines: list[Line], column_gap_ratio: float = 0.08) -> list[Line]:
-    """Column-aware reading order: split any line that actually spans
-    multiple columns, cluster the resulting lines into columns by
-    x-position, order columns right-to-left for a majority-Arabic page
-    (else left-to-right), and keep lines within each column top-to-bottom.
+def _cluster_columns_and_order(lines: list[Line], column_gap_ratio: float, rtl_page: bool) -> list[Line]:
+    """Column-cluster a set of lines that are already known to belong to
+    one coherent region (see order_lines_reading_order), order columns
+    right-to-left for a majority-Arabic page (else left-to-right), and
+    keep lines within each column top-to-bottom.
+
+    rtl_page is computed ONCE for the whole page and passed in, not
+    recomputed per block/region — confirmed real bug: a small block can
+    have a near-even word split (e.g. two rows of a 2-column diagram, one
+    English line + one Arabic line each) whose *own* majority swings
+    either way by coincidence, giving different blocks inconsistent
+    reading directions on the same page. The page-level computation, over
+    far more text, is far more reliable — and a document has one reading
+    direction, not a different one per section.
     """
     if not lines:
         return []
 
-    split_lines = [
-        Line(words=run, block_num=line.block_num, par_num=line.par_num, line_num=line.line_num)
-        for line in lines
-        for run in _split_line_into_column_runs(line)
-    ]
-
-    rtl_page = _is_majority_arabic(" ".join(line.text for line in split_lines))
-
-    sorted_by_x = sorted(split_lines, key=lambda line: line.rect.x)
-    leftmost = min(line.rect.x for line in split_lines)
-    rightmost = max(line.rect.x + line.rect.width for line in split_lines)
+    sorted_by_x = sorted(lines, key=lambda line: line.rect.x)
+    leftmost = min(line.rect.x for line in lines)
+    rightmost = max(line.rect.x + line.rect.width for line in lines)
     gap_threshold = max((rightmost - leftmost) * column_gap_ratio, 20)
 
     columns: list[list[Line]] = [[sorted_by_x[0]]]
@@ -242,6 +243,46 @@ def order_lines_reading_order(lines: list[Line], column_gap_ratio: float = 0.08)
     ordered: list[Line] = []
     for col in columns:
         ordered.extend(sorted(col, key=lambda line: line.rect.y))
+    return ordered
+
+
+def order_lines_reading_order(lines: list[Line], column_gap_ratio: float = 0.08) -> list[Line]:
+    """Column-aware reading order: split any line that actually spans
+    multiple columns, then cluster into columns and order right-to-left
+    (Arabic) or left-to-right, keeping lines within a column top-to-bottom.
+
+    Column-clustering is scoped to one Tesseract block at a time, not the
+    whole page — confirmed real bug (docs/phases/phase-2-ocr-pipeline.md):
+    doing it globally scrambled reading order on a page mixing full-width
+    paragraphs with a 3-box side-by-side diagram, a data table, and
+    colored side-by-side panels, because a full-width paragraph line's
+    x-range overlaps every narrower box/column below it, so they all got
+    lumped into "one column" together. Tesseract's own block segmentation
+    (psm 3) already separates these regions correctly — verified: each
+    row of a 3-box diagram became its own block — so it's trusted as the
+    region boundary. Blocks are then stacked by their own top position,
+    not assumed to already be in top-to-bottom order.
+    """
+    if not lines:
+        return []
+
+    split_lines = [
+        Line(words=run, block_num=line.block_num, par_num=line.par_num, line_num=line.line_num)
+        for line in lines
+        for run in _split_line_into_column_runs(line)
+    ]
+
+    rtl_page = _is_majority_arabic(" ".join(line.text for line in split_lines))
+
+    blocks: dict[int, list[Line]] = {}
+    for line in split_lines:
+        blocks.setdefault(line.block_num, []).append(line)
+
+    block_order = sorted(blocks, key=lambda block_num: min(line.rect.y for line in blocks[block_num]))
+
+    ordered: list[Line] = []
+    for block_num in block_order:
+        ordered.extend(_cluster_columns_and_order(blocks[block_num], column_gap_ratio, rtl_page))
     return ordered
 
 

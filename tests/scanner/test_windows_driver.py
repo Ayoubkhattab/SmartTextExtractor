@@ -143,15 +143,27 @@ def test_scan_sets_requested_dpi_and_saves_a_file(fake_win32com, tmp_path) -> No
     assert result.file_path.exists()
 
 
+def _fake_com_error(real_hresult: int, description: str) -> Exception:
+    """Shapes a fake exception exactly like a real pywintypes.com_error —
+    args = (scode, text, excepinfo, argerr), where the WIA-specific
+    HRESULT lives at excepinfo[5], NOT at args[0] (that's always the
+    generic DISP_E_EXCEPTION wrapper). Confirmed against a real Epson
+    scanner (WIA_ERROR_BUSY, 0x80210006) — see
+    windows.py::_extract_wia_hresult's docstring. An earlier version of
+    this fixture used exc.hresult directly, which doesn't exist on a real
+    pywintypes.com_error at all, and let a real extraction bug pass tests
+    silently until actual hardware caught it.
+    """
+    excepinfo = (0, None, description, None, 0, real_hresult - 0x100000000)
+    return Exception(-2147352567, "Exception occurred.", excepinfo, None)
+
+
 def test_com_error_is_translated_to_unified_taxonomy(fake_win32com, monkeypatch) -> None:
     from smart_text_extractor.scanner.drivers.windows import WiaDriver
     from smart_text_extractor.scanner.errors import PaperEmptyError
 
-    class _FakeComError(Exception):
-        hresult = 0x80210003 - 0x100000000  # WIA_ERROR_PAPER_EMPTY, as pywin32 signs it
-
     def _raise(*_args, **_kwargs):
-        raise _FakeComError("paper empty")
+        raise _fake_com_error(0x80210003, "paper empty")  # WIA_ERROR_PAPER_EMPTY
 
     driver = WiaDriver()
     handle = driver.open("dev-123")
@@ -161,3 +173,38 @@ def test_com_error_is_translated_to_unified_taxonomy(fake_win32com, monkeypatch)
 
     with pytest.raises(PaperEmptyError):
         driver.scan(handle, ScanSettings(dpi=300))
+
+
+def test_wia_error_busy_is_translated_correctly_real_world_regression(fake_win32com, monkeypatch) -> None:
+    """Regression test for the real bug: exc.args[0] is always the generic
+    DISP_E_EXCEPTION wrapper, never the actual WIA error — this exact
+    shape (down to the HRESULT) was captured live from an Epson WF-C5890."""
+    from smart_text_extractor.scanner.drivers.windows import WiaDriver
+    from smart_text_extractor.scanner.errors import DeviceBusyError
+    from smart_text_extractor.scanner.models import ScanSettings
+
+    def _raise(*_args, **_kwargs):
+        raise _fake_com_error(0x80210006, "The WIA device is busy.")  # WIA_ERROR_BUSY
+
+    driver = WiaDriver()
+    handle = driver.open("dev-123")
+    monkeypatch.setattr(fake_win32com.device.item, "Transfer", _raise)
+
+    with pytest.raises(DeviceBusyError):
+        driver.scan(handle, ScanSettings(dpi=300))
+
+
+def test_win32_error_not_ready_is_translated_correctly_real_world_regression(fake_win32com, monkeypatch) -> None:
+    """The other real error hit live: ERROR_NOT_READY during open(), right
+    after physically connecting the scanner (it was still initializing)."""
+    from smart_text_extractor.scanner.drivers.windows import WiaDriver
+    from smart_text_extractor.scanner.errors import DeviceBusyError
+
+    def _raise(*_args, **_kwargs):
+        raise _fake_com_error(0x80070015, "The device is not ready.")  # Win32 ERROR_NOT_READY
+
+    monkeypatch.setattr(fake_win32com.device_info, "Connect", _raise)
+
+    driver = WiaDriver()
+    with pytest.raises(DeviceBusyError):
+        driver.open("dev-123")

@@ -1,12 +1,19 @@
 """Windows scanner driver: WIA (Windows Image Acquisition) via pywin32 (§4.2).
 
-STATUS: implemented against the WIA automation API but NOT YET VERIFIED
-against real hardware — no scanner was attached during Phase 0 (see
-docs/phases/phase-0-spike.md). In particular the WIA_ERROR_* HRESULT
-mapping in _translate_com_error below is transcribed from Microsoft's
-wiaerror.h from memory and must be confirmed by actually triggering each
-error condition (paper jam, paper empty, cover open, USB unplug) on a
-real device before this driver is trusted in production.
+STATUS: verified against a real device — an Epson WF-C5890 (eSCL/USB,
+DeviceID "SWD\\EsclUsb\\...") — during Phase 0 (see
+docs/phases/phase-0-spike.md). discover()/open()/capabilities() all
+confirmed working against real hardware. scan() has NOT yet completed a
+full transfer: the one real attempt hit WIA_ERROR_BUSY (0x80210006) —
+correctly classified as DeviceBusyError once _extract_wia_hresult was
+fixed (see its docstring) — and hasn't been retried yet. Two real errors
+seen so far, both now mapped: WIA_ERROR_BUSY and the Win32-level
+ERROR_NOT_READY (0x80070015, hit during open() shortly after the
+scanner was physically connected — almost certainly the device still
+initializing, not a code bug: a retry a few seconds later succeeded).
+The rest of _COM_ERROR_MAP (paper jam, paper empty, cover open, USB
+unplug) is still transcribed from Microsoft's wiaerror.h from memory,
+unconfirmed.
 """
 from __future__ import annotations
 
@@ -55,23 +62,60 @@ _COLOR_MODE_TO_INTENT = {
 # WIA_FORMAT_BMP — uncompressed, simplest transfer format to depend on.
 _WIA_FORMAT_BMP = "{B96B3CAB-0728-11D3-9D7B-0000F81EF32E}"
 
-# HRESULT -> exception mapping, transcribed from wiaerror.h.
-# UNVERIFIED against real hardware — see module docstring.
+# HRESULT -> exception mapping. 0x80210006 and 0x80070015 are confirmed
+# against a real Epson scanner (see module docstring); the rest is still
+# transcribed from wiaerror.h from memory, unconfirmed.
 _COM_ERROR_MAP: dict[int, type[ScannerError]] = {
     0x80210001: DeviceDisconnectedError,  # WIA_ERROR_GENERAL_ERROR
     0x80210002: PaperJamError,  # WIA_ERROR_PAPER_JAM
     0x80210003: PaperEmptyError,  # WIA_ERROR_PAPER_EMPTY
     0x80210005: DeviceDisconnectedError,  # WIA_ERROR_OFFLINE
-    0x80210006: DeviceBusyError,  # WIA_ERROR_BUSY
+    0x80210006: DeviceBusyError,  # WIA_ERROR_BUSY — CONFIRMED real (Epson WF-C5890)
     0x80210008: CoverOpenError,  # WIA_ERROR_USER_INTERVENTION (commonly: cover open)
     0x8021000A: DeviceDisconnectedError,  # WIA_ERROR_DEVICE_COMMUNICATION
     0x8021000D: DeviceBusyError,  # WIA_ERROR_DEVICE_LOCKED
+    0x80070015: DeviceBusyError,  # Win32 ERROR_NOT_READY — CONFIRMED real, hit during open()
+    # shortly after physically connecting the scanner; a retry a few
+    # seconds later succeeded, so DeviceBusyError (retry-friendly) fits
+    # better than DeviceDisconnectedError here.
+    0x801901F7: DeviceBusyError,  # WinHTTP-facility HRESULT for HTTP 503 — CONFIRMED real,
+    # hit during scan()'s Transfer() call. This Epson (DeviceID prefix
+    # "SWD\EsclUsb") bridges WIA to its internal eSCL/HTTP scan service;
+    # 503 means that embedded service wasn't ready to accept the scan job
+    # yet. DeviceBusyError fits the same "transient, retry" semantics as
+    # the other two confirmed real errors above.
 }
+
+
+def _extract_wia_hresult(exc: Exception) -> int | None:
+    """pywintypes.com_error.args is (scode, text, excepinfo, argerr).
+
+    scode (args[0]) is almost always the generic DISP_E_EXCEPTION
+    (0x80020009) that COM wraps *any* dispatch-method exception in — it is
+    NEVER the WIA-specific error. The real WIA error code lives inside
+    excepinfo (args[2]), specifically its own scode at index 5:
+    excepinfo = (wCode, source, description, helpFile, helpContext, scode).
+
+    Confirmed against a real Epson scanner (WIA_ERROR_BUSY, 0x80210006):
+    exc.args was (-2147352567, 'Exception occurred.',
+    (0, None, 'The WIA device is busy.', None, 0, -2145320954), None) —
+    args[0] is the generic wrapper; args[2][5] (-2145320954 == 0x80210006)
+    is the real, mappable error. A first version of this function read
+    args[0] and always fell through to the generic ScannerError as a
+    result — every WIA-specific error was silently unclassified.
+    """
+    args = getattr(exc, "args", None)
+    if not args:
+        return None
+    excepinfo = args[2] if len(args) > 2 else None
+    if isinstance(excepinfo, tuple) and len(excepinfo) >= 6 and excepinfo[5]:
+        return excepinfo[5]
+    return args[0] if args[0] else None
 
 
 def _translate_com_error(exc: Exception) -> ScannerError:
     """Map a pywin32 com_error to our unified taxonomy; fall back to a generic wrap."""
-    hresult = getattr(exc, "hresult", None) or getattr(exc, "args", [None])[0]
+    hresult = _extract_wia_hresult(exc)
     if hresult is not None:
         # pywin32 reports HRESULTs as signed 32-bit ints; WIA docs use unsigned.
         unsigned = hresult & 0xFFFFFFFF

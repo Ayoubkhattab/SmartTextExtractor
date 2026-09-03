@@ -6,8 +6,10 @@ from smart_text_extractor.core.models import BoundingBox, Rect
 from smart_text_extractor.ocr.reorder import (
     Line,
     _is_majority_arabic,
+    _is_mostly_latin,
     _split_line_into_column_runs,
     group_into_lines,
+    merge_dual_language_passes,
     words_from_tsv,
 )
 
@@ -92,3 +94,75 @@ def test_split_line_into_column_runs_no_split_when_words_are_close() -> None:
     runs = _split_line_into_column_runs(line)
     assert len(runs) == 1
     assert [w.text for w in runs[0]] == ["First", "Second"]
+
+
+def test_is_mostly_latin() -> None:
+    assert _is_mostly_latin("Hello") is True
+    assert _is_mostly_latin("مرحبا") is False
+    assert _is_mostly_latin("") is False
+    assert _is_mostly_latin("123") is False  # digits aren't letters
+
+
+def _tagged(text: str, confidence: float, rect: Rect) -> tuple[BoundingBox, int, int, int]:
+    """A words_from_tsv()-shaped entry, for tests that build fixtures
+    directly instead of going through a fake TSV dict."""
+    return (BoundingBox(text=text, rect=rect, confidence=confidence), 1, 0, 1)
+
+
+class TestMergeDualLanguagePasses:
+    """Regression tests for a real bug (docs/phases/phase-2-ocr-pipeline.md):
+    running lang="ara+eng" sometimes misclassifies isolated Arabic words as
+    Latin garbage. All fixtures use the exact real words/confidences
+    captured from the document that exposed this."""
+
+    def test_replaces_low_confidence_latin_word_with_higher_confidence_arabic_match(self) -> None:
+        rect = Rect(100, 50, 30, 20)
+        primary = [_tagged("Fro", 18.0, rect)]
+        arabic_only = [_tagged("صريح", 27.0, rect)]
+
+        merged = merge_dual_language_passes(primary, arabic_only)
+
+        assert merged[0][0].text == "صريح"
+
+    def test_keeps_high_confidence_english_word_over_a_lower_confidence_arabic_match(self) -> None:
+        """The exact real regression: "Plan" (conf 96) has an ara-only
+        "alternative" ("مقا", conf 52) that IS mostly-Arabic-script but is
+        actually garbage from forcing Arabic classification onto English
+        glyphs — lower confidence than the correct primary reading."""
+        rect = Rect(200, 50, 40, 20)
+        primary = [_tagged("Plan", 96.0, rect)]
+        arabic_only = [_tagged("مقا", 52.0, rect)]
+
+        merged = merge_dual_language_passes(primary, arabic_only)
+
+        assert merged[0][0].text == "Plan"
+
+    def test_keeps_english_word_when_arabic_pass_produces_non_arabic_garbage(self) -> None:
+        """"Software" -> ara-only pass produces "5011100121" (digit soup,
+        not Arabic script) — must never replace real English regardless
+        of confidence, since it isn't a valid alternative at all."""
+        rect = Rect(0, 0, 60, 20)
+        primary = [_tagged("Software", 96.0, rect)]
+        arabic_only = [_tagged("5011100121", 99.0, rect)]  # even if "confident", it's not Arabic
+
+        merged = merge_dual_language_passes(primary, arabic_only)
+
+        assert merged[0][0].text == "Software"
+
+    def test_leaves_arabic_words_untouched(self) -> None:
+        rect = Rect(0, 0, 50, 20)
+        primary = [_tagged("مرحبا", 90.0, rect)]
+        arabic_only = [_tagged("مرحبا", 10.0, rect)]  # irrelevant — primary was never Latin
+
+        merged = merge_dual_language_passes(primary, arabic_only)
+
+        assert merged[0][0].text == "مرحبا"
+        assert merged[0][0].confidence == 90.0
+
+    def test_no_overlapping_arabic_word_leaves_primary_untouched(self) -> None:
+        primary = [_tagged("Fro", 18.0, Rect(100, 50, 30, 20))]
+        arabic_only = [_tagged("شيء", 99.0, Rect(500, 500, 30, 20))]  # far away, no overlap
+
+        merged = merge_dual_language_passes(primary, arabic_only)
+
+        assert merged[0][0].text == "Fro"

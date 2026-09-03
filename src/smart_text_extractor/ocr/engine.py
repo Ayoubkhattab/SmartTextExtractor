@@ -14,7 +14,13 @@ from PIL import Image
 
 from smart_text_extractor.core.models import OcrResult
 from smart_text_extractor.ocr.preprocessing import preprocess
-from smart_text_extractor.ocr.reorder import assemble_text, group_into_lines, order_lines_reading_order, words_from_tsv
+from smart_text_extractor.ocr.reorder import (
+    assemble_text,
+    group_into_lines,
+    merge_dual_language_passes,
+    order_lines_reading_order,
+    words_from_tsv,
+)
 
 
 def _as_bgr_array(image: np.ndarray | Image.Image | Path | str) -> np.ndarray:
@@ -60,6 +66,22 @@ class OcrEngine:
             preprocessed, lang=self.lang, config=f"--psm {psm}", output_type=pytesseract.Output.DICT
         )
         tagged_words = words_from_tsv(data)
+
+        if self.lang == "ara+eng":
+            # §7.1.1 extension — confirmed real: ara+eng sometimes
+            # misclassifies isolated Arabic words as Latin garbage. A
+            # second ara-only pass gets those specific words right, and
+            # merge_dual_language_passes' "must be mostly Arabic to
+            # substitute" guard keeps it from touching genuine English
+            # runs, whose ara-only alternative is unreadable garbage too.
+            # This doubles OCR time for mixed-language pages — a real
+            # cost, accepted because it fixes a confirmed accuracy bug.
+            arabic_only_data = pytesseract.image_to_data(
+                preprocessed, lang="ara", config=f"--psm {psm}", output_type=pytesseract.Output.DICT
+            )
+            arabic_only_words = words_from_tsv(arabic_only_data)
+            tagged_words = merge_dual_language_passes(tagged_words, arabic_only_words)
+
         lines = group_into_lines(tagged_words)
         ordered_lines = order_lines_reading_order(lines)
 

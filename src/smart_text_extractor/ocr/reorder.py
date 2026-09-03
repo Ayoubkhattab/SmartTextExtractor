@@ -97,6 +97,80 @@ def _is_majority_arabic(text: str) -> bool:
     return arabic_count / len(letters) > 0.5
 
 
+_LATIN_RANGE_MAX = 0x024F  # rough upper bound of Latin script + extensions
+
+
+def _is_mostly_latin(text: str) -> bool:
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    latin_count = sum(1 for c in letters if ord(c) <= _LATIN_RANGE_MAX)
+    return latin_count / len(letters) > 0.5
+
+
+def _rect_iou(a: Rect, b: Rect) -> float:
+    x1, y1 = max(a.x, b.x), max(a.y, b.y)
+    x2, y2 = min(a.x + a.width, b.x + b.width), min(a.y + a.height, b.y + b.height)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    intersection = (x2 - x1) * (y2 - y1)
+    union = a.width * a.height + b.width * b.height - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def merge_dual_language_passes(
+    primary_words: list[tuple[BoundingBox, int, int, int]],
+    arabic_only_words: list[tuple[BoundingBox, int, int, int]],
+) -> list[tuple[BoundingBox, int, int, int]]:
+    """Corrects a real, confirmed Tesseract failure mode (see
+    docs/phases/phase-2-ocr-pipeline.md): running lang="ara+eng" together
+    sometimes misclassifies isolated Arabic letter-shapes as Latin
+    garbage — confirmed on a real document: "من" -> "OR", "صريح" -> "Fro",
+    "مبنياً" -> "Liisa", "الساعة" -> "deludl" — while genuine English runs
+    ("Software Department — Structure, Operating Model & Staffing Plan",
+    "Agile") are read correctly by the same pass.
+
+    A parallel ara-only pass gets those specific misread Arabic words
+    right. For each primary (ara+eng) word that looks mostly-Latin, this
+    looks for the spatially overlapping word in the ara-only pass and
+    prefers it — but only if that alternative is mostly-Arabic (not
+    digit/symbol soup — a genuine English run's ara-only alternative is
+    unreadable garbage too, e.g. "Software" -> "5011100121", so it never
+    passes this check) AND has strictly higher confidence than the
+    primary word.
+
+    That confidence comparison was added after real data showed the
+    "mostly Arabic" check alone isn't sufficient: on the same real page,
+    "Plan" (primary confidence 96) had an ara-only alternative "مقا"
+    (confidence 52) that WAS mostly-Arabic and got wrongly substituted
+    in, corrupting a correctly-read English word. Every genuine
+    correction observed (e.g. "Fro" @18 -> "صريح" @27, "Liisa" @51 ->
+    "مبنياً" @57) had the alternative's confidence exceed the primary's;
+    the one bad substitution ("Plan" @96 -> "مقا" @52) did not. Requiring
+    a strict improvement fixes the real errors and leaves "Plan" alone.
+    """
+    merged: list[tuple[BoundingBox, int, int, int]] = []
+    for box, block, par, line in primary_words:
+        if _is_mostly_latin(box.text):
+            best_match: BoundingBox | None = None
+            best_iou = 0.0
+            for a_box, _a_block, _a_par, _a_line in arabic_only_words:
+                iou = _rect_iou(box.rect, a_box.rect)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_match = a_box
+            if (
+                best_match is not None
+                and best_iou > 0.3
+                and _is_majority_arabic(best_match.text)
+                and best_match.confidence > box.confidence
+            ):
+                merged.append((best_match, block, par, line))
+                continue
+        merged.append((box, block, par, line))
+    return merged
+
+
 def _split_line_into_column_runs(line: Line, gap_multiplier: float = 3.0) -> list[list[BoundingBox]]:
     """A single Tesseract "line" can actually span two visually distinct
     columns: empirically (docs/phases/phase-2-ocr-pipeline.md), Tesseract's

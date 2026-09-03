@@ -206,6 +206,52 @@ def _split_line_into_column_runs(line: Line, gap_multiplier: float = 3.0) -> lis
     return [run for run in runs if run]
 
 
+def _line_text_with_cell_separators(
+    line: Line, gap_multiplier: float = 4.0, min_gap_threshold: float = 40.0, separator: str = " | "
+) -> str:
+    """Renders one already-ordered row as text, inserting `separator` at
+    table-cell boundaries instead of a plain space — addresses a real,
+    evidence-confirmed complaint (user report + docs/phases/phase-2-ocr-pipeline.md):
+    table rows were unreadable because every cell got mashed together with
+    a single space, indistinguishable from the words within a cell.
+
+    Evidence (real table, page 3 of هيكلية القسم والمكاتب.pdf, Tesseract
+    TSV for one row — "تخطيط الدورة | بداية كل دورة ٠ ساعتان | المكاتب
+    الخمسة + رئيس القسم | سجل الدورة مع تقديرات..."): within-cell word
+    gaps measured 9-18px; the 3 real cell-boundary gaps measured 94px,
+    101px, and 173px — roughly 7-12x the smallest within-line gap. A
+    normal prose line from the same page (block 2, no table) had gaps
+    clustered at 10-18px with NO outliers at all. This gives a reliable,
+    self-calibrating signal per line: flag a gap as a cell boundary only
+    if it's both far bigger than that line's own tightest word spacing
+    (gap_multiplier) AND bigger than a small absolute floor
+    (min_gap_threshold, guards short lines/near-zero gaps).
+
+    Deliberately does NOT reuse _split_line_into_column_runs: that
+    function re-sorts words by x because it targets a different bug
+    (Tesseract merging two separate visual columns into one line, in the
+    wrong order). Here the row's word order is already correct (per the
+    module-level empirical finding), so gaps are measured directly on
+    `line.words` in their existing order — re-sorting is unnecessary and
+    would risk misreading which side of a gap is "first" for RTL rows.
+    """
+    words = line.words
+    if len(words) <= 1:
+        return line.text
+
+    gaps = [
+        max(a.rect.x, b.rect.x) - min(a.rect.x + a.rect.width, b.rect.x + b.rect.width)
+        for a, b in zip(words, words[1:])
+    ]
+    gap_threshold = max(min(gaps) * gap_multiplier, min_gap_threshold)
+
+    parts = [words[0].text]
+    for word, gap in zip(words[1:], gaps):
+        parts.append(separator if gap > gap_threshold else " ")
+        parts.append(word.text)
+    return "".join(parts)
+
+
 def _cluster_columns_and_order(lines: list[Line], column_gap_ratio: float, rtl_page: bool) -> list[Line]:
     """Column-cluster a set of lines that are already known to belong to
     one coherent region (see order_lines_reading_order), order columns
@@ -287,4 +333,23 @@ def order_lines_reading_order(lines: list[Line], column_gap_ratio: float = 0.08)
 
 
 def assemble_text(lines: list[Line]) -> str:
-    return "\n".join(line.text for line in lines)
+    """Joins lines within the same Tesseract block with a single newline,
+    and separates blocks (paragraphs, table regions, diagram boxes...)
+    with a blank line — addresses a real complaint that extracted text
+    read as one undifferentiated wall of text with no paragraph structure.
+    Relies on order_lines_reading_order's block_order pass already having
+    made same-block lines contiguous, so a block_num change is a reliable
+    paragraph boundary without needing to re-group here.
+    """
+    if not lines:
+        return ""
+
+    paragraphs: list[list[str]] = [[]]
+    current_block = lines[0].block_num
+    for line in lines:
+        if line.block_num != current_block:
+            paragraphs.append([])
+            current_block = line.block_num
+        paragraphs[-1].append(_line_text_with_cell_separators(line))
+
+    return "\n\n".join("\n".join(paragraph) for paragraph in paragraphs)

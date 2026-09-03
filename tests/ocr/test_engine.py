@@ -6,11 +6,21 @@ from tests.ocr.conftest import make_degraded_arabic_image, make_text_image, requ
 @requires_tesseract
 @requires_arabic_font
 def test_engine_extracts_arabic_and_english_text_correctly(ocr_engine) -> None:
+    # width/height=1700 (both above upscale_if_small's 1600px trigger, see
+    # preprocessing.py): a real captured page is never a 5.5:1-aspect,
+    # 144px-tall sliver — a page-shaped canvas keeps this test decoupled
+    # from the upscale path (covered separately in test_preprocessing.py)
+    # instead of accidentally exercising it, which real Tesseract data
+    # showed breaks this specific synthetic fixture — see make_text_image's
+    # docstring on this rendering path's already-documented non-monotonic
+    # sensitivity to effective glyph size.
     image = make_text_image(
         [
             ("مرحباً بكم في مستخرج النص الذكي", True),
             ("Smart Text Extractor 2026", False),
-        ]
+        ],
+        width=1700,
+        height=1700,
     )
 
     result = ocr_engine.run(image)

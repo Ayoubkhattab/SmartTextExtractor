@@ -9,6 +9,29 @@ import cv2
 import numpy as np
 
 
+def upscale_if_small(image: np.ndarray, min_dimension: int = 1600, max_scale: float = 3.0) -> np.ndarray:
+    """Upscales low-resolution images before OCR — addresses a real gap:
+    PDF pages always go through render_pdf_to_images at a fixed 300 DPI
+    (comfortably sharp), but a directly-uploaded image (a phone photo, a
+    screenshot, an old low-DPI scan) can arrive far smaller, well below
+    the ~300 DPI-equivalent text height Tesseract is tuned for. Cubic
+    upscaling before the rest of the pipeline gives the denoise/deskew/
+    contrast steps and Tesseract itself more pixels per glyph to work
+    with. Only triggers when the image's smaller dimension is actually
+    below min_dimension — a normal 300 DPI page is left untouched — and
+    max_scale caps the blow-up on a genuinely tiny source (e.g. a
+    thumbnail) rather than upscaling it 10x into a soft, unreadable mess.
+    """
+    height, width = image.shape[:2]
+    smaller_dimension = min(height, width)
+    if smaller_dimension >= min_dimension:
+        return image
+
+    scale = min(min_dimension / smaller_dimension, max_scale)
+    new_size = (round(width * scale), round(height * scale))
+    return cv2.resize(image, new_size, interpolation=cv2.INTER_CUBIC)
+
+
 def denoise(image: np.ndarray) -> np.ndarray:
     if image.ndim == 3:
         return cv2.fastNlMeansDenoisingColored(image, None, 10, 10, 7, 21)
@@ -79,10 +102,16 @@ def deskew(image: np.ndarray) -> np.ndarray:
 
 
 def preprocess(image: np.ndarray) -> np.ndarray:
-    """The full §7.1 pipeline: deskew -> denoise -> contrast.
+    """The full §7.1 pipeline: upscale (if small) -> deskew -> denoise -> contrast.
 
-    Deskew runs FIRST, not last — confirmed real bug: CLAHE contrast
-    enhancement measurably degrades edge characteristics that
+    Upscaling runs first — a low-resolution source has the least to work
+    with at every later step (Hough line detection, denoising, and
+    Tesseract itself all do better with more pixels per glyph), so there
+    is more signal to preserve the earlier this runs. It is a no-op for
+    any normally-sized page (see upscale_if_small).
+
+    Deskew then runs before denoise/contrast — confirmed real bug: CLAHE
+    contrast enhancement measurably degrades edge characteristics that
     _estimate_skew_angle's Hough line detection depends on. On a
     deliberately degraded (skewed + noisy + low-contrast) test image,
     running deskew after denoise/contrast made _estimate_skew_angle
@@ -92,4 +121,4 @@ def preprocess(image: np.ndarray) -> np.ndarray:
     first, on the least-processed edges available, fixed it: the same
     image went from garbled/fragmented OCR output to an exact match.
     """
-    return enhance_contrast(denoise(deskew(image)))
+    return enhance_contrast(denoise(deskew(upscale_if_small(image))))

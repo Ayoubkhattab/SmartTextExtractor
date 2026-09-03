@@ -4,7 +4,8 @@ import cv2
 import numpy as np
 import pytest
 
-from smart_text_extractor.ocr.preprocessing import deskew, denoise, enhance_contrast, preprocess
+from smart_text_extractor.ocr.preprocessing import deskew, denoise, enhance_contrast, preprocess, upscale_if_small
+from tests.ocr.conftest import make_text_image, requires_arabic_font, requires_tesseract
 
 
 def _measured_skew_angle(image: np.ndarray) -> float:
@@ -102,6 +103,60 @@ def test_enhance_contrast_returns_grayscale_same_shape() -> None:
 
 
 def test_full_pipeline_runs_end_to_end_without_error() -> None:
+    """The 400x600 synthetic fixture is below upscale_if_small's default
+    threshold, so the pipeline both upscales (3x, its max_scale cap) and
+    converts to grayscale — output shape is scaled, not identical."""
     tilted_color = cv2.cvtColor(_synthetic_text_lines_image(angle_degrees=5.0), cv2.COLOR_GRAY2BGR)
     result = preprocess(tilted_color)
-    assert result.shape[:2] == tilted_color.shape[:2]
+    assert result.shape == (1200, 1800)
+
+
+def test_upscale_if_small_scales_up_a_low_resolution_image() -> None:
+    small = np.full((400, 600, 3), 200, dtype=np.uint8)
+    result = upscale_if_small(small, min_dimension=1600, max_scale=3.0)
+    assert result.shape == (1200, 1800, 3)  # capped at max_scale=3.0, not the full 4x to reach 1600
+
+
+def test_upscale_if_small_leaves_an_already_large_image_untouched() -> None:
+    large = np.full((2000, 1700, 3), 200, dtype=np.uint8)
+    result = upscale_if_small(large, min_dimension=1600, max_scale=3.0)
+    assert result is large
+
+
+def test_upscale_if_small_preserves_aspect_ratio() -> None:
+    small = np.full((300, 900, 3), 200, dtype=np.uint8)  # smaller dimension = height (300)
+    result = upscale_if_small(small, min_dimension=1500, max_scale=10.0)
+    assert result.shape == (1500, 4500, 3)
+
+
+@requires_tesseract
+@requires_arabic_font
+def test_upscale_if_small_real_world_regression_recovers_recognition_on_a_low_res_image() -> None:
+    """Regression test for the "improve extraction from images" request:
+    an uploaded image can be far lower resolution than a PDF page always
+    rendered at 300 DPI. Measured live: a normal 800x144 synthetic
+    mixed-script image OCRs cleanly (10/10 words); shrunk to 25% (200x36,
+    simulating a low-res upload), Tesseract mangled it into 4 garbage
+    tokens ('مرحيابكم', 'مستغرج', ...); running upscale_if_small on the
+    shrunk image before OCR fully recovered all 10 words, exact match to
+    the full-resolution result.
+    """
+    import pytesseract
+
+    image = make_text_image(
+        [
+            ("مرحباً بكم في مستخرج النص الذكي", True),
+            ("Smart Text Extractor 2026", False),
+        ]
+    )
+    shrunk = cv2.resize(image, (image.shape[1] // 4, image.shape[0] // 4), interpolation=cv2.INTER_AREA)
+
+    def recognized_words(img: np.ndarray) -> list[str]:
+        text = pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6")
+        return [w for w in text.split() if w.strip()]
+
+    words_without_upscale = recognized_words(shrunk)
+    words_with_upscale = recognized_words(upscale_if_small(shrunk, min_dimension=1600, max_scale=3.0))
+
+    assert len(words_without_upscale) <= 5  # confirmed real: mangled into 4 garbage tokens
+    assert len(words_with_upscale) == 10

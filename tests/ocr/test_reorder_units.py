@@ -7,7 +7,9 @@ from smart_text_extractor.ocr.reorder import (
     Line,
     _is_majority_arabic,
     _is_mostly_latin,
+    _line_text_with_cell_separators,
     _split_line_into_column_runs,
+    assemble_text,
     group_into_lines,
     merge_dual_language_passes,
     order_lines_reading_order,
@@ -198,3 +200,103 @@ class TestOrderLinesReadingOrderPerBlock:
 
         texts = [w.text for line in ordered for w in line.words]
         assert texts == ["فقرة", "يمين", "وسط", "يسار"]
+
+
+class TestLineTextWithCellSeparators:
+    """Regression tests for a real complaint (docs/phases/phase-2-ocr-pipeline.md):
+    table rows read as an unreadable wall of words because every cell was
+    joined with a plain space, indistinguishable from words within a
+    cell. Fixtures for the "real row" case use the exact word
+    left/width values captured from Tesseract TSV for one real table row
+    on page 3 of هيكلية القسم والمكاتب.pdf ("تخطيط الدورة | بداية كل دورة
+    ٠ ساعتان | المكاتب الخمسة + رئيس القسم | سجل الدورة مع تقديرات وبنود
+    مستوفية الجاهزية"), given here in Tesseract's own (already-correct,
+    right-to-left) word order.
+    """
+
+    def test_real_table_row_gets_separators_at_the_three_real_cell_boundaries(self) -> None:
+        # (text, left, width) — y/height are irrelevant to this function, held constant.
+        real_row = [
+            ("تخطيط", 2135, 104),
+            ("الدورة", 2039, 84),
+            ("بداية", 1799, 67),
+            ("كل", 1759, 28),
+            ("دورة", 1687, 58),
+            ("٠", 1667, 5),
+            ("ساعتان", 1554, 99),
+            ("المكاتب", 1348, 105),
+            ("الخمسة", 1226, 109),
+            ("+", 1197, 17),
+            ("رئيس", 1111, 73),
+            ("القسم", 1012, 85),
+            ("سجل", 842, 76),
+            ("الدورة", 751, 78),
+            ("مع", 701, 38),
+            ("تقديرات", 586, 106),
+            ("وبنود", 504, 70),
+            ("مستوفية", 371, 122),
+            ("الجاهزية", 243, 116),
+        ]
+        line = Line(
+            words=[BoundingBox(text, Rect(left, 1325, width, 37), 90.0) for text, left, width in real_row],
+            block_num=10,
+            par_num=1,
+            line_num=1,
+        )
+
+        text = _line_text_with_cell_separators(line)
+
+        assert text == (
+            "تخطيط الدورة | بداية كل دورة ٠ ساعتان | المكاتب الخمسة + رئيس القسم"
+            " | سجل الدورة مع تقديرات وبنود مستوفية الجاهزية"
+        )
+
+    def test_no_separator_when_all_gaps_are_uniform_prose_spacing(self) -> None:
+        """Same page, a genuine prose line (block 2, no table): real gaps
+        clustered at 10-18px with no outliers — must stay plain-spaced."""
+        prose_row = [
+            ("بنمط", 2096, 80),
+            ("مزدوج:", 1969, 112),
+            ("بنودها", 1850, 102),
+            ("التطويرية", 1685, 147),
+            ("تدخل", 1579, 94),
+            ("الدورة.", 1458, 105),
+        ]
+        line = Line(
+            words=[BoundingBox(text, Rect(left, 578, width, 45), 90.0) for text, left, width in prose_row],
+            block_num=2,
+            par_num=1,
+            line_num=3,
+        )
+
+        text = _line_text_with_cell_separators(line)
+
+        assert "|" not in text
+        assert text == "بنمط مزدوج: بنودها التطويرية تدخل الدورة."
+
+    def test_single_word_line_returns_its_own_text_unchanged(self) -> None:
+        line = Line(words=[BoundingBox("وحيدة", Rect(0, 0, 50, 20), 90.0)], block_num=1, par_num=0, line_num=1)
+        assert _line_text_with_cell_separators(line) == "وحيدة"
+
+
+class TestAssembleTextParagraphSpacing:
+    """Regression test for a real complaint: extracted text read as one
+    undifferentiated wall of text. Different Tesseract blocks (paragraphs,
+    table regions, diagram boxes) must be visually separated by a blank
+    line in the assembled output, while lines within one block stay
+    single-spaced.
+    """
+
+    def test_different_blocks_get_a_blank_line_between_them_same_block_does_not(self) -> None:
+        lines = [
+            Line(words=[BoundingBox("a", Rect(0, 0, 10, 10), 90.0)], block_num=1, par_num=0, line_num=1),
+            Line(words=[BoundingBox("b", Rect(0, 20, 10, 10), 90.0)], block_num=1, par_num=0, line_num=2),
+            Line(words=[BoundingBox("c", Rect(0, 50, 10, 10), 90.0)], block_num=2, par_num=0, line_num=1),
+        ]
+
+        text = assemble_text(lines)
+
+        assert text == "a\nb\n\nc"
+
+    def test_empty_lines_list_returns_empty_string(self) -> None:
+        assert assemble_text([]) == ""

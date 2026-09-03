@@ -77,9 +77,23 @@ def render_rtl_text(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, f
 
 
 def make_text_image(
-    lines: list[tuple[str, bool]], width: int = 900, height: int | None = None, font_size: int = 32
+    lines: list[tuple[str, bool]], width: int = 800, height: int | None = None, font_size: int = 32
 ) -> np.ndarray:
-    """lines: list of (text, is_rtl). Returns a BGR numpy array (OpenCV-style)."""
+    """lines: list of (text, is_rtl). Returns a BGR numpy array (OpenCV-style).
+
+    width=800/font_size=32 is not an arbitrary default — bisecting this
+    exact two-line layout (see docs/phases/phase-2-ocr-pipeline.md) found
+    Arabic recognition success is NON-monotonic in font_size with this
+    Tesseract build (32 and 40 fully correct; 36 and 44 returned nothing
+    for the Arabic line entirely; 20/24/28 misread "2026" as "6"). There is
+    no simple "bigger is safer" rule here — this combination is the one
+    with the most empirical confirmation of working cleanly, not a proof
+    it always will. Tests that depend on this function keep their
+    assertions loose (word presence, not exact strings) precisely because
+    this rendering path (Pillow without libraqm, synthetic glyphs) is
+    known to be more fragile across environments than a real scanned
+    document ever is — see the OcrEngine module docstring.
+    """
     line_height = font_size + 20
     height = height or (line_height * len(lines) + 40)
     img = Image.new("RGB", (width, height), "white")

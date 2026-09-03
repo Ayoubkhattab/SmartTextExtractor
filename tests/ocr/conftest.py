@@ -93,3 +93,30 @@ def make_text_image(
         else:
             draw.text((20, y), text, font=font, fill="black")
     return np.array(img)[:, :, ::-1]  # RGB -> BGR
+
+
+def make_degraded_arabic_image(text: str, width: int = 1000, height: int = 200) -> np.ndarray:
+    """A synthetic stand-in for a real poor-quality capture: skewed,
+    low-contrast (gray-on-off-white, not black-on-white), and noisy.
+
+    This is what actually caught the real bug it exists to regression-test:
+    OcrEngine.run() used to send the raw image straight to Tesseract,
+    skipping the deskew/contrast/denoise pipeline entirely even though
+    that pipeline was built and tested — on a clean image the gap didn't
+    show, but on an image shaped like this one, un-preprocessed OCR came
+    back as three garbage characters instead of the sentence.
+    """
+    import cv2
+
+    img = Image.new("RGB", (width, height), (235, 230, 220))
+    font = ImageFont.truetype(str(ARABIC_FONT), 34)
+    draw = ImageDraw.Draw(img)
+    render_rtl_text(draw, (30, 60), text, font, (90, 85, 80))
+    arr = np.array(img)[:, :, ::-1]
+
+    rotation_matrix = cv2.getRotationMatrix2D((width // 2, height // 2), 6.0, 1.0)
+    arr = cv2.warpAffine(arr, rotation_matrix, (width, height), borderValue=(235, 230, 220))
+
+    rng = np.random.default_rng(seed=7)
+    noise = rng.normal(0, 15, arr.shape).astype(np.int16)
+    return np.clip(arr.astype(np.int16) + noise, 0, 255).astype(np.uint8)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tests.ocr.conftest import make_text_image, requires_arabic_font, requires_tesseract
+from tests.ocr.conftest import make_degraded_arabic_image, make_text_image, requires_arabic_font, requires_tesseract
 
 
 @requires_tesseract
@@ -45,6 +45,26 @@ def test_engine_populates_word_boxes_with_real_coordinates(ocr_engine) -> None:
     for box in result.word_boxes:
         assert box.rect.width > 0
         assert box.rect.height > 0
+
+
+@requires_tesseract
+@requires_arabic_font
+def test_engine_applies_preprocessing_to_a_degraded_image_real_world_regression(ocr_engine) -> None:
+    """Regression test for a real bug found from live user feedback ("Arabic
+    extraction is weak"): OcrEngine.run() sent the raw image straight to
+    Tesseract, silently skipping the deskew/contrast/denoise pipeline that
+    had been built and tested but never wired in. Manually confirmed: on
+    this exact degraded image, the un-preprocessed path returned only 3
+    garbage characters ('ا ل ل') instead of the sentence — see
+    docs/phases/phase-2-ocr-pipeline.md for the full before/after."""
+    text = "مرحباً بكم في مستخرج النص الذكي وهذا اختبار لجودة الاستخراج"
+    image = make_degraded_arabic_image(text)
+
+    result = ocr_engine.run(image)
+
+    expected_words = ("مرحبا", "بكم", "في", "مستخرج", "النص", "الذكي", "اختبار", "الاستخراج")
+    found = sum(word in result.raw_text for word in expected_words)
+    assert found >= 6, f"expected most words recognized from the degraded image, got: {result.raw_text!r}"
 
 
 @requires_tesseract

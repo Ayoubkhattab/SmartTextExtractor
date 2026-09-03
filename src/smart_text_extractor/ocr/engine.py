@@ -1,4 +1,4 @@
-"""Tesseract OCR execution and result assembly (§7.1 steps 3 and 5).
+"""Tesseract OCR execution and result assembly (§7.1 steps 2, 3, and 5).
 
 Wraps pytesseract so the rest of the app depends on OcrResult, never on
 pytesseract's dict shape directly.
@@ -13,7 +13,20 @@ import pytesseract
 from PIL import Image
 
 from smart_text_extractor.core.models import OcrResult
+from smart_text_extractor.ocr.preprocessing import preprocess
 from smart_text_extractor.ocr.reorder import assemble_text, group_into_lines, order_lines_reading_order, words_from_tsv
+
+
+def _as_bgr_array(image: np.ndarray | Image.Image | Path | str) -> np.ndarray:
+    """Normalizes any of OcrEngine.run()'s accepted input types into the
+    BGR numpy array preprocessing.py works on."""
+    if isinstance(image, np.ndarray):
+        return image
+    if isinstance(image, Image.Image):
+        pil_image = image
+    else:
+        pil_image = Image.open(image)
+    return np.array(pil_image.convert("RGB"))[:, :, ::-1]
 
 
 class OcrEngine:
@@ -30,8 +43,12 @@ class OcrEngine:
             os.environ["TESSDATA_PREFIX"] = str(tessdata_dir)
 
     def run(self, image: np.ndarray | Image.Image | Path | str, psm: int = 6) -> OcrResult:
+        # §7.1 step 2 — this was previously skipped entirely: run() sent
+        # the raw image straight to Tesseract, so deskew/contrast/denoise
+        # existed as tested code that nothing ever actually called.
+        preprocessed = preprocess(_as_bgr_array(image))
         data = pytesseract.image_to_data(
-            image, lang=self.lang, config=f"--psm {psm}", output_type=pytesseract.Output.DICT
+            preprocessed, lang=self.lang, config=f"--psm {psm}", output_type=pytesseract.Output.DICT
         )
         tagged_words = words_from_tsv(data)
         lines = group_into_lines(tagged_words)

@@ -33,13 +33,16 @@ jobs:
       # Language data is fetched directly rather than relying on each
       # platform's package naming for it, so both runners test against the
       # exact same ara/eng/osd files (see docs/phases/phase-2-ocr-pipeline.md).
-      - name: Download tessdata (ara, eng, osd)
+      # tessdata_best (not the standard/fast repo) — real-hardware testing
+      # showed the standard ara model was a meaningful accuracy gap on its
+      # own, separate from the preprocessing-wiring bug found alongside it.
+      - name: Download tessdata_best (ara, eng, osd)
         shell: bash
         run: |
           mkdir -p tessdata
-          curl -sL -o tessdata/ara.traineddata https://github.com/tesseract-ocr/tessdata/raw/main/ara.traineddata
-          curl -sL -o tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata
-          curl -sL -o tessdata/osd.traineddata https://github.com/tesseract-ocr/tessdata/raw/main/osd.traineddata
+          curl -sL -o tessdata/ara.traineddata https://github.com/tesseract-ocr/tessdata_best/raw/main/ara.traineddata
+          curl -sL -o tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata_best/raw/main/eng.traineddata
+          curl -sL -o tessdata/osd.traineddata https://github.com/tesseract-ocr/tessdata_best/raw/main/osd.traineddata
 
       - name: Install (Windows)
         if: runner.os == 'Windows'

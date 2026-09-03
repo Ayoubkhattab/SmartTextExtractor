@@ -146,3 +146,44 @@ def test_scan_with_devices_shows_a_different_message(qtbot, document, monkeypatc
 
     assert len(shown) == 1
     assert "1" in shown[0][2]  # message text mentions the device count
+
+
+def test_opening_a_multi_page_pdf_adds_one_page_per_pdf_page(qtbot, document, tmp_path: Path) -> None:
+    import pymupdf
+
+    pdf_path = tmp_path / "doc.pdf"
+    doc = pymupdf.open()
+    for i in range(3):
+        page = doc.new_page(width=300, height=200)
+        page.insert_text((20, 20), f"page {i + 1}", fontsize=16)
+    doc.save(str(pdf_path))
+    doc.close()
+
+    pool = _FakeOcrPool()
+    window = MainWindow(document, pool, _FakeScannerService())
+    qtbot.addWidget(window)
+
+    window._open_file(pdf_path)
+
+    assert len(document.pages) == 3
+    assert window._page_list.count() == 3
+    assert len(pool.submitted_pages) == 3
+
+
+def test_opening_a_broken_pdf_shows_a_warning_not_a_crash(qtbot, document, tmp_path: Path, monkeypatch) -> None:
+    fake_pdf = tmp_path / "not_really_a_pdf.pdf"
+    fake_pdf.write_bytes(b"this is not a valid pdf file")
+
+    window = MainWindow(document, _FakeOcrPool(), _FakeScannerService())
+    qtbot.addWidget(window)
+
+    shown = []
+    monkeypatch.setattr(
+        "smart_text_extractor.ui.main_window.QMessageBox.warning",
+        lambda *args, **kwargs: shown.append(args),
+    )
+
+    window._open_file(fake_pdf)
+
+    assert len(shown) == 1
+    assert len(document.pages) == 0

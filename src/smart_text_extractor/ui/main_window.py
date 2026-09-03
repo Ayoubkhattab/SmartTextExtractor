@@ -1,6 +1,6 @@
 """Main application window (§14 Phase 1/3 remaining UI tasks).
 
-MVP scope: open image file(s) -> run through the real OCR pipeline
+MVP scope: open image/PDF file(s) -> run through the real OCR pipeline
 (OcrEngine, via OcrWorkerPool) -> show extracted text, editable (US-06).
 The Scan button is wired to the real ScannerService — with no scanner
 currently available to test against, it exercises the same
@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QPixmap
+from PyQt6.QtCore import QObject, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QFileDialog,
+    QFrame,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -23,11 +25,34 @@ from PyQt6.QtWidgets import (
     QStatusBar,
     QTextEdit,
     QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
 
 from smart_text_extractor.concurrency.ocr_worker_pool import OcrWorkerPool
 from smart_text_extractor.core.models import Document, OcrStatus, Page
+from smart_text_extractor.core.pdf_import import render_pdf_to_images
 from smart_text_extractor.scanner.service import ScannerService
+
+_TEXT_COLOR = "#1a1d21"
+
+_STYLESHEET = f"""
+QMainWindow, QWidget {{ background-color: #f4f5f7; color: {_TEXT_COLOR}; font-family: "Segoe UI", "Tahoma", sans-serif; font-size: 13px; }}
+QToolBar {{ background-color: #ffffff; border-bottom: 1px solid #dde1e6; padding: 8px; spacing: 8px; }}
+QToolButton {{ background-color: #2f6fed; color: white; border: none; border-radius: 6px; padding: 8px 16px; font-weight: 600; }}
+QToolButton:hover {{ background-color: #1f5adb; }}
+QToolButton:pressed {{ background-color: #17439f; }}
+QStatusBar {{ background-color: #ffffff; border-top: 1px solid #dde1e6; color: #5b6472; padding: 4px 8px; }}
+QListWidget {{ background-color: #ffffff; color: {_TEXT_COLOR}; border: 1px solid #dde1e6; border-radius: 8px; padding: 4px; outline: none; }}
+QListWidget::item {{ border-radius: 6px; padding: 8px; margin: 2px; color: {_TEXT_COLOR}; }}
+QListWidget::item:selected {{ background-color: #e8effe; color: #17439f; }}
+QListWidget::item:hover:!selected {{ background-color: #f0f2f5; }}
+QFrame#card {{ background-color: #ffffff; border: 1px solid #dde1e6; border-radius: 8px; }}
+QLabel#cardTitle {{ color: #5b6472; font-weight: 600; padding: 8px 12px; border-bottom: 1px solid #eceff2; }}
+QLabel#imagePreview {{ color: #9aa2ad; }}
+QTextEdit {{ background-color: #ffffff; color: {_TEXT_COLOR}; border: none; padding: 12px; font-size: 14px; selection-background-color: #b9d0fb; }}
+QSplitter::handle {{ background-color: #f4f5f7; width: 6px; }}
+"""
 
 
 class _OcrBridge(QObject):
@@ -42,7 +67,26 @@ class _OcrBridge(QObject):
     page_done = pyqtSignal(object, object)
 
 
+def _card(title: str, content: QWidget) -> QFrame:
+    """A titled panel — used for the image preview and the text editor so
+    the window reads as distinct sections instead of two bare widgets
+    glued together."""
+    frame = QFrame()
+    frame.setObjectName("card")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+
+    title_label = QLabel(title)
+    title_label.setObjectName("cardTitle")
+    layout.addWidget(title_label)
+    layout.addWidget(content, stretch=1)
+    return frame
+
+
 class MainWindow(QMainWindow):
+    _THUMBNAIL_SIZE = 56
+
     def __init__(self, document: Document, ocr_pool: OcrWorkerPool, scanner_service: ScannerService) -> None:
         super().__init__()
         self._document = document
@@ -54,7 +98,8 @@ class MainWindow(QMainWindow):
         self._bridge.page_done.connect(self._on_page_done)
 
         self.setWindowTitle("مستخرج النص الذكي — Smart Text Extractor")
-        self.resize(1100, 700)
+        self.resize(1200, 750)
+        self.setStyleSheet(_STYLESHEET)
 
         self._build_toolbar()
         self._build_central_widget()
@@ -65,10 +110,12 @@ class MainWindow(QMainWindow):
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("الأدوات")
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(18, 18))
         self.addToolBar(toolbar)
 
-        open_action = QAction("افتح صورة...", self)
-        open_action.triggered.connect(self._on_open_images)
+        open_action = QAction("افتح صورة أو PDF...", self)
+        open_action.triggered.connect(self._on_open_files)
         toolbar.addAction(open_action)
 
         scan_action = QAction("مسح ضوئي...", self)
@@ -77,36 +124,62 @@ class MainWindow(QMainWindow):
 
     def _build_central_widget(self) -> None:
         self._page_list = QListWidget()
+        self._page_list.setIconSize(QSize(self._THUMBNAIL_SIZE, self._THUMBNAIL_SIZE))
         self._page_list.currentRowChanged.connect(self._on_page_selected)
+        pages_card = _card("الصفحات", self._page_list)
+        pages_card.setMinimumWidth(220)
+        pages_card.setMaximumWidth(320)
 
         self._image_label = QLabel("لا توجد صفحة محددة")
+        self._image_label.setObjectName("imagePreview")
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._image_label.setMinimumWidth(400)
+        self._image_label.setMinimumWidth(380)
+        image_card = _card("معاينة الصورة", self._image_label)
 
         self._text_edit = QTextEdit()
         self._text_edit.setPlaceholderText("سيظهر النص المستخرج هنا بعد المعالجة...")
         self._text_edit.textChanged.connect(self._on_text_edited)
+        text_card = _card("النص المستخرج", self._text_edit)
 
         right_split = QSplitter(Qt.Orientation.Horizontal)
-        right_split.addWidget(self._image_label)
-        right_split.addWidget(self._text_edit)
-        right_split.setSizes([500, 500])
+        right_split.addWidget(image_card)
+        right_split.addWidget(text_card)
+        right_split.setSizes([550, 550])
 
         main_split = QSplitter(Qt.Orientation.Horizontal)
-        main_split.addWidget(self._page_list)
+        main_split.addWidget(pages_card)
         main_split.addWidget(right_split)
-        main_split.setSizes([200, 900])
+        main_split.setSizes([240, 960])
 
-        self.setCentralWidget(main_split)
+        central = QWidget()
+        central_layout = QHBoxLayout(central)
+        central_layout.setContentsMargins(12, 12, 12, 12)
+        central_layout.addWidget(main_split)
+        self.setCentralWidget(central)
 
     # --- actions ---------------------------------------------------------
 
-    def _on_open_images(self) -> None:
+    def _on_open_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "افتح صورة أو أكثر", "", "Images (*.png *.jpg *.jpeg *.bmp *.tiff)"
+            self,
+            "افتح صورة أو ملف PDF",
+            "",
+            "الملفات المدعومة (*.png *.jpg *.jpeg *.bmp *.tiff *.pdf);;صور (*.png *.jpg *.jpeg *.bmp *.tiff);;PDF (*.pdf)",
         )
         for path_str in paths:
-            self._add_page(Path(path_str))
+            self._open_file(Path(path_str))
+
+    def _open_file(self, path: Path) -> None:
+        if path.suffix.lower() == ".pdf":
+            try:
+                image_paths = render_pdf_to_images(path, self._document.temp_dir_path)
+            except Exception as exc:  # noqa: BLE001 - surfaced to the user, not a crash
+                QMessageBox.warning(self, "تعذّرت قراءة الملف", f"تعذّر فتح {path.name}:\n{exc}")
+                return
+            for image_path in image_paths:
+                self._add_page(image_path)
+        else:
+            self._add_page(path)
 
     def _on_scan(self) -> None:
         devices = self._scanner_service.discover()
@@ -124,21 +197,34 @@ class MainWindow(QMainWindow):
 
     def _add_page(self, image_path: Path) -> None:
         page = self._document.add_page(image_path)
-        item = QListWidgetItem(f"{len(self._document.pages)}. {image_path.name} — قيد المعالجة")
+        item = QListWidgetItem(self._thumbnail_icon(image_path), f"{image_path.name}\nقيد المعالجة")
         self._page_list.addItem(item)
         self._page_list.setCurrentRow(self._page_list.count() - 1)
         self.statusBar().showMessage(f"تجري معالجة {image_path.name}...")
         self._ocr_pool.submit(page, lambda p, err: self._bridge.page_done.emit(p, err))
 
+    def _thumbnail_icon(self, image_path: Path) -> QIcon:
+        pixmap = QPixmap(str(image_path))
+        if pixmap.isNull():
+            return QIcon()
+        scaled = pixmap.scaled(
+            self._THUMBNAIL_SIZE,
+            self._THUMBNAIL_SIZE,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        return QIcon(scaled)
+
     def _on_page_done(self, page: Page, error: Exception | None) -> None:
         index = self._document.pages.index(page)
         item = self._page_list.item(index)
         if error is not None:
-            item.setText(f"{index + 1}. {page.image_path.name} — فشل ({error})")
-            self.statusBar().showMessage(f"فشلت معالجة {page.image_path.name}")
+            item.setText(f"{page.image_path.name}\nفشل ({error})")
         else:
-            item.setText(f"{index + 1}. {page.image_path.name} — تم")
-            self.statusBar().showMessage(f"اكتملت معالجة {page.image_path.name}")
+            item.setText(f"{page.image_path.name}\nتم ✓")
+        self.statusBar().showMessage(
+            f"اكتملت معالجة {page.image_path.name}" if error is None else f"فشلت معالجة {page.image_path.name}"
+        )
         if self._page_list.currentRow() == index:
             self._refresh_detail_panel(page)
 
@@ -152,8 +238,8 @@ class MainWindow(QMainWindow):
         if not pixmap.isNull():
             self._image_label.setPixmap(
                 pixmap.scaled(
-                    max(self._image_label.width(), 1),
-                    max(self._image_label.height(), 1),
+                    max(self._image_label.width() - 24, 1),
+                    max(self._image_label.height() - 24, 1),
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )

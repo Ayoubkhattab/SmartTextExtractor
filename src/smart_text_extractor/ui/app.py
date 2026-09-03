@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from smart_text_extractor.concurrency.ocr_worker_pool import OcrWorkerPool
@@ -22,6 +23,7 @@ from smart_text_extractor.ui.main_window import MainWindow
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)  # Arabic-first UI, not a mirrored English one
 
     workspace = TempWorkspace()
     workspace.cleanup_orphaned()  # §9.1: sweep any leftovers from a prior crash

@@ -73,6 +73,7 @@ class Page:
     crop_box: Rect | None = None
     ocr_status: OcrStatus = OcrStatus.PENDING
     ocr_result: OcrResult | None = None
+    included_in_range: bool = True  # US-08: page-range selection for export
 
     def set_rotation(self, degrees: int) -> None:
         if degrees not in ROTATION_DEGREES:
@@ -84,9 +85,26 @@ class Page:
         self.crop_box = rect
         self._invalidate_ocr_if_done()
 
+    def set_edited_text(self, text: str) -> None:
+        """US-06. Never touches raw_text (§5.2) — edited_text is the only
+        field a user edit ever writes to."""
+        if self.ocr_result is None:
+            self.ocr_result = OcrResult()
+        self.ocr_result.edited_text = text
+
+    @property
+    def is_locked_for_reordering(self) -> bool:
+        """§3.1: a page mid-OCR can't be dragged — the UI checks this before
+        allowing a drag to start; Document.reorder_pages enforces it too."""
+        return self.ocr_status == OcrStatus.PROCESSING
+
     def _invalidate_ocr_if_done(self) -> None:
         if self.ocr_status == OcrStatus.DONE:
             self.ocr_status = OcrStatus.PENDING
+
+
+class PageLockedError(Exception):
+    """Raised when a reorder would move a page that's currently mid-OCR (§3.1)."""
 
 
 @dataclass
@@ -98,8 +116,42 @@ class Document:
     id: str = field(default_factory=lambda: uuid4().hex)
     pages: list[Page] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
+    _reorder_history: list[list[str]] = field(default_factory=list, repr=False)
 
     def add_page(self, image_path: Path, dpi: int | None = None) -> Page:
         page = Page(image_path=image_path, order_index=len(self.pages), dpi=dpi)
         self.pages.append(page)
         return page
+
+    def reorder_pages(self, new_order_page_ids: list[str]) -> None:
+        """US-07 (drag-and-drop). Raises PageLockedError instead of silently
+        allowing a reorder that would move a page mid-OCR (§3.1) — the UI is
+        expected to have already prevented the drag, but the domain layer
+        enforces the invariant regardless of what called it.
+        """
+        by_id = {page.id: page for page in self.pages}
+        if set(new_order_page_ids) != set(by_id):
+            raise ValueError("new_order_page_ids must be a permutation of the document's current page ids")
+
+        current_order = [page.id for page in self.pages]
+        for page_id, new_index in {pid: i for i, pid in enumerate(new_order_page_ids)}.items():
+            page = by_id[page_id]
+            if page.is_locked_for_reordering and current_order.index(page_id) != new_index:
+                raise PageLockedError(f"page {page_id} is mid-OCR and cannot be reordered")
+
+        self._reorder_history.append(current_order)
+        self.pages = [by_id[pid] for pid in new_order_page_ids]
+        for index, page in enumerate(self.pages):
+            page.order_index = index
+
+    def undo_reorder(self) -> bool:
+        """Restores the order from before the last reorder_pages() call.
+        Returns False (no-op) if there is nothing to undo."""
+        if not self._reorder_history:
+            return False
+        previous_order = self._reorder_history.pop()
+        by_id = {page.id: page for page in self.pages}
+        self.pages = [by_id[pid] for pid in previous_order]
+        for index, page in enumerate(self.pages):
+            page.order_index = index
+        return True

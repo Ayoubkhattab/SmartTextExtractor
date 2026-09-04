@@ -11,7 +11,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QIcon, QPixmap, QTextCharFormat, QTextCursor
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QIcon,
+    QPixmap,
+    QTextCharFormat,
+    QTextCursor,
+    QTextFrameFormat,
+    QTextTableFormat,
+)
 from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -30,7 +40,7 @@ from PyQt6.QtWidgets import (
 )
 
 from smart_text_extractor.concurrency.ocr_worker_pool import OcrWorkerPool
-from smart_text_extractor.core.models import Document, OcrResult, OcrStatus, Page, TextSegment
+from smart_text_extractor.core.models import Document, DocumentUnit, OcrResult, OcrStatus, Page, TextSegment
 from smart_text_extractor.core.pdf_import import render_pdf_to_images
 from smart_text_extractor.export.docx_export import PageContent, export_docx
 from smart_text_extractor.scanner.service import ScannerService
@@ -51,6 +61,13 @@ _LOW_CONFIDENCE_THRESHOLD = 75.0
 _VERY_LOW_CONFIDENCE_THRESHOLD = 50.0
 _LOW_CONFIDENCE_COLOR = QColor("#fdf0b5")
 _VERY_LOW_CONFIDENCE_COLOR = QColor("#f8c9c9")
+
+# Heading style for the structured live-text view (§7.1.1 extension):
+# matches the blue already used for the toolbar's action buttons, so a
+# heading reads as a heading the same way it does in the Word export.
+_HEADING_COLOR = QColor("#1f5adb")
+_HEADING_FONT_POINT_SIZE = 16
+_TABLE_BORDER_COLOR = QColor("#c7ccd4")
 
 _STYLESHEET = f"""
 QMainWindow, QWidget {{ background-color: #f4f5f7; color: {_TEXT_COLOR}; font-family: "Segoe UI", "Tahoma", sans-serif; font-size: 13px; }}
@@ -360,28 +377,81 @@ class MainWindow(QMainWindow):
             return
         self._refresh_detail_panel(self._document.pages[row])
 
+    def _char_format_for(self, confidence: float | None, *, heading: bool = False) -> QTextCharFormat:
+        """The one place confidence-highlighting is decided, shared by
+        every renderer below — a table cell or a heading is not
+        automatically trustworthy just because it was recognized as one,
+        so the same yellow/red signal _render_segments always gave
+        applies here too, layered under the heading's own bold/blue
+        styling rather than replaced by it."""
+        char_format = QTextCharFormat()
+        if heading:
+            char_format.setFontWeight(QFont.Weight.Bold)
+            char_format.setFontPointSize(_HEADING_FONT_POINT_SIZE)
+            char_format.setForeground(_HEADING_COLOR)
+        if confidence is not None and confidence < _LOW_CONFIDENCE_THRESHOLD:
+            is_very_low = confidence < _VERY_LOW_CONFIDENCE_THRESHOLD
+            char_format.setBackground(_VERY_LOW_CONFIDENCE_COLOR if is_very_low else _LOW_CONFIDENCE_COLOR)
+        return char_format
+
+    def _insert_segments(self, cursor: QTextCursor, segments: list[TextSegment], *, heading: bool = False) -> None:
+        for segment in segments:
+            cursor.insertText(segment.text, self._char_format_for(segment.confidence, heading=heading))
+
     def _render_segments(self, segments: list[TextSegment]) -> None:
-        """Paints OcrResult.segments into the text editor, giving each
-        word a background color keyed to its recognition confidence.
+        """Paints a flat OcrResult.segments list into the text editor —
+        the fallback for a result that has segments but no document_units
+        (a caller that built OcrResult directly, e.g. some tests).
         Concatenating segment.text in order is exactly raw_text (see
         TextSegment's docstring), so this is purely a formatting pass —
         it does not change what toPlainText() returns once the user
         starts editing."""
         self._text_edit.clear()
         cursor = QTextCursor(self._text_edit.document())
-        plain_format = QTextCharFormat()
-        low_format = QTextCharFormat()
-        low_format.setBackground(_LOW_CONFIDENCE_COLOR)
-        very_low_format = QTextCharFormat()
-        very_low_format.setBackground(_VERY_LOW_CONFIDENCE_COLOR)
-        for segment in segments:
-            if segment.confidence is None or segment.confidence >= _LOW_CONFIDENCE_THRESHOLD:
-                char_format = plain_format
-            elif segment.confidence >= _VERY_LOW_CONFIDENCE_THRESHOLD:
-                char_format = low_format
+        self._insert_segments(cursor, segments)
+
+    def _insert_table(self, cursor: QTextCursor, rows: list[list[list[TextSegment]]]) -> None:
+        """Builds a real table grid instead of pipe-separated text —
+        right-to-left, so cell 0 (the first cell in reading order) lands
+        in the rightmost visual column: confirmed empirically that
+        QTextTableFormat's layoutDirection does NOT do this on its own
+        (a synthetic RTL table still put logical column 0 on the left),
+        so the column position is reversed explicitly instead — the same
+        real finding behind docx_export.py's w:bidiVisual fix."""
+        column_count = max(len(row) for row in rows)
+        table_format = QTextTableFormat()
+        table_format.setCellPadding(4)
+        table_format.setCellSpacing(0)
+        table_format.setBorder(1)
+        table_format.setBorderStyle(QTextFrameFormat.BorderStyle.BorderStyle_Solid)
+        table_format.setBorderBrush(_TABLE_BORDER_COLOR)
+        table = cursor.insertTable(len(rows), column_count, table_format)
+        for row_index, row in enumerate(rows):
+            for logical_column, cell_segments in enumerate(row):
+                visual_column = column_count - 1 - logical_column
+                cell_cursor = table.cellAt(row_index, visual_column).firstCursorPosition()
+                self._insert_segments(cell_cursor, cell_segments)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+
+    def _render_document_units(self, units: list[DocumentUnit]) -> None:
+        """Paints OcrResult.document_units into the text editor as real
+        structure — an actual table grid, a visually distinct heading —
+        instead of flattening everything to plain text, while every word
+        still carries its own confidence highlighting (see
+        _char_format_for). This is what makes the extracted-text panel
+        read like the original page's layout instead of a flat text
+        dump, addressing a real user request for exactly that."""
+        self._text_edit.clear()
+        cursor = QTextCursor(self._text_edit.document())
+        for index, unit in enumerate(units):
+            if index > 0:
+                cursor.insertBlock()
+            if unit.kind == "heading":
+                self._insert_segments(cursor, unit.segments, heading=True)
+            elif unit.kind == "table":
+                self._insert_table(cursor, unit.rows)
             else:
-                char_format = very_low_format
-            cursor.insertText(segment.text, char_format)
+                self._insert_segments(cursor, unit.segments)
 
     def _refresh_detail_panel(self, page: Page) -> None:
         pixmap = QPixmap(str(page.image_path))
@@ -404,13 +474,16 @@ class MainWindow(QMainWindow):
                 # longer correspond to what's on screen — show their text
                 # plainly rather than highlighting stale confidence data.
                 self._text_edit.setPlainText(page.ocr_result.edited_text)
+            elif page.ocr_result.document_units:
+                self._render_document_units(page.ocr_result.document_units)
             elif page.ocr_result.segments:
                 self._render_segments(page.ocr_result.segments)
             else:
-                # segments is only populated by OcrEngine.run() — a
-                # caller that builds OcrResult directly (tests, or any
-                # future non-OCR text source) still gets its raw_text
-                # shown, just without confidence highlighting.
+                # document_units/segments are only populated by
+                # OcrEngine.run() — a caller that builds OcrResult
+                # directly (tests, or any future non-OCR text source)
+                # still gets its raw_text shown, just without structure
+                # or confidence highlighting.
                 self._text_edit.setPlainText(page.ocr_result.raw_text)
             self._text_edit.setReadOnly(False)
         elif page.ocr_status == OcrStatus.FAILED:
@@ -419,6 +492,15 @@ class MainWindow(QMainWindow):
         else:
             self._text_edit.setPlainText("... جارٍ الاستخلاص")
             self._text_edit.setReadOnly(True)
+        # Building rich content (tables especially) leaves the cursor —
+        # and so Qt's auto-scroll-to-cursor — wherever the last insert
+        # happened, not the top. A freshly opened/selected page should
+        # always start showing its beginning. moveCursor() alone was
+        # confirmed NOT enough (verified: a real long page still opened
+        # scrolled to roughly its middle) — the scrollbar needs resetting
+        # directly too.
+        self._text_edit.moveCursor(QTextCursor.MoveOperation.Start)
+        self._text_edit.verticalScrollBar().setValue(0)
         self._suppress_text_changed = False
 
     def _on_text_edited(self) -> None:

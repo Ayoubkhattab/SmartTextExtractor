@@ -14,7 +14,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
-from smart_text_extractor.core.models import DocumentUnit
+from smart_text_extractor.core.models import DocumentUnit, TextSegment
 
 # A page's content is either its still-structured OCR result (most pages)
 # or a plain string — a page the user has edited only has edited_text, a
@@ -37,16 +37,37 @@ def _set_rtl(paragraph: Paragraph) -> None:
     paragraph_properties.append(paragraph_properties.makeelement(qn("w:bidi"), {}))
 
 
-def _add_table(document: docx.document.Document, rows: list[list[str]]) -> None:
+def _set_table_rtl(table: docx.table.Table) -> None:
+    """Marks a table right-to-left via the real w:bidiVisual OOXML flag —
+    verified visually (rendered through actual Word to PDF): without
+    this, python-docx's table.cell(0, 0) always lands in the leftmost
+    visual column regardless of paragraph direction, so a table built
+    from already-correct right-to-left cell content (row[0] = the first
+    cell to read) rendered with its columns in the wrong order — cell 0
+    on the left instead of the right. w:bidiVisual is what actually
+    flips the visual column order to match; per-paragraph w:bidi/right
+    alignment inside each cell only affects that cell's own text, not
+    which physical column it appears in.
+    """
+    table_properties = table._tbl.tblPr
+    table_properties.append(table_properties.makeelement(qn("w:bidiVisual"), {}))
+
+
+def _segments_to_text(segments: list[TextSegment]) -> str:
+    return "".join(segment.text for segment in segments)
+
+
+def _add_table(document: docx.document.Document, rows: list[list[list[TextSegment]]]) -> None:
     if not rows:
         return
     column_count = max(len(row) for row in rows)
     table = document.add_table(rows=len(rows), cols=column_count)
     table.style = "Table Grid"
+    _set_table_rtl(table)
     for row_index, row in enumerate(rows):
         for column_index in range(column_count):
             cell = table.cell(row_index, column_index)
-            cell.text = row[column_index] if column_index < len(row) else ""
+            cell.text = _segments_to_text(row[column_index]) if column_index < len(row) else ""
             for paragraph in cell.paragraphs:
                 _set_rtl(paragraph)
 
@@ -54,11 +75,11 @@ def _add_table(document: docx.document.Document, rows: list[list[str]]) -> None:
 def _add_units(document: docx.document.Document, units: list[DocumentUnit]) -> None:
     for unit in units:
         if unit.kind == "heading":
-            _set_rtl(document.add_heading(unit.text, level=2))
+            _set_rtl(document.add_heading(_segments_to_text(unit.segments), level=2))
         elif unit.kind == "table":
             _add_table(document, unit.rows)
         else:
-            _set_rtl(document.add_paragraph(unit.text))
+            _set_rtl(document.add_paragraph(_segments_to_text(unit.segments)))
 
 
 def _add_plain_text(document: docx.document.Document, text: str) -> None:

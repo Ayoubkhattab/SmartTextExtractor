@@ -519,7 +519,13 @@ class TestAssembleMarkdown:
         assert _block_is_tabular([row1]) is False  # a single row is never "a table"
 
     def test_rows_to_markdown_table_pads_ragged_rows(self) -> None:
-        table = _rows_to_markdown_table([["A", "B", "C"], ["1", "2"]])
+        def cell(text: str) -> list[TextSegment]:
+            return [TextSegment(text, 90.0)]
+
+        rows = [[cell("A"), cell("B"), cell("C")], [cell("1"), cell("2")]]
+
+        table = _rows_to_markdown_table(rows)
+
         lines = table.splitlines()
         assert lines[0] == "| A | B | C |"
         assert lines[1] == "| --- | --- | --- |"

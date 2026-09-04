@@ -10,11 +10,16 @@ from pathlib import Path
 
 import pytest
 
-from PyQt6.QtGui import QTextCursor
+from PyQt6.QtGui import QFont, QTextCursor
 
 from smart_text_extractor.core.models import Document, DocumentUnit, OcrResult, OcrStatus, SourceType, TextSegment
 from smart_text_extractor.scanner.models import ScannerDeviceInfo
-from smart_text_extractor.ui.main_window import MainWindow
+from smart_text_extractor.ui.main_window import (
+    _HEADING_FONT_POINT_SIZE,
+    _LOW_CONFIDENCE_COLOR,
+    _VERY_LOW_CONFIDENCE_COLOR,
+    MainWindow,
+)
 
 
 class _FakeOcrPool:
@@ -127,11 +132,137 @@ def test_low_and_very_low_confidence_words_are_highlighted_distinctly(qtbot, doc
     window._page_list.setCurrentRow(0)
 
     assert window._text_edit.toPlainText() == "Good Iffy Bad"
-    from smart_text_extractor.ui.main_window import _LOW_CONFIDENCE_COLOR, _VERY_LOW_CONFIDENCE_COLOR
-
     assert _char_format_at(window._text_edit, 0).background().color().name() != _LOW_CONFIDENCE_COLOR.name()
     assert _char_format_at(window._text_edit, 5).background().color().name() == _LOW_CONFIDENCE_COLOR.name()
     assert _char_format_at(window._text_edit, 10).background().color().name() == _VERY_LOW_CONFIDENCE_COLOR.name()
+
+
+def _cell_text(table, row: int, col: int) -> str:
+    cell = table.cellAt(row, col)
+    cursor = cell.firstCursorPosition()
+    cursor.setPosition(cell.lastCursorPosition().position(), QTextCursor.MoveMode.KeepAnchor)
+    return cursor.selectedText()
+
+
+def _first_table(text_edit):
+    # cursor.currentTable() on a cursor moved to document Start lands at
+    # the table's own frame boundary, not "inside" a cell, and returns
+    # None — walking the document's frame tree instead reliably finds
+    # the table object itself (confirmed: PyQt returns the real QTextTable
+    # subtype from childFrames(), not just a base QTextFrame).
+    return text_edit.document().rootFrame().childFrames()[0]
+
+
+def _open_page_with_document_units(qtbot, document, sample_image, units):
+    result = OcrResult(raw_text="placeholder", document_units=units)
+    pool = _FakeOcrPool(result=result)
+    window = MainWindow(document, pool, _FakeScannerService())
+    qtbot.addWidget(window)
+    window._add_page(sample_image)
+    window._page_list.setCurrentRow(0)
+    return window
+
+
+def test_table_document_unit_renders_as_a_real_table_grid(qtbot, document, sample_image) -> None:
+    """A real user request (docs/phases/phase-2-ocr-pipeline.md): the
+    live extracted-text panel should look organized like the original
+    page, not a flat text dump — a table unit becomes an actual
+    QTextTable grid, not pipe-separated text."""
+    rows = [
+        [[TextSegment("A", 90.0)], [TextSegment("B", 90.0)]],
+        [[TextSegment("1", 90.0)], [TextSegment("2", 90.0)]],
+    ]
+    units = [DocumentUnit(kind="table", rows=rows)]
+    window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+    table = _first_table(window._text_edit)
+
+    assert table is not None
+    assert table.rows() == 2
+    assert table.columns() == 2
+
+
+def test_table_cells_render_in_right_to_left_column_order(qtbot, document, sample_image) -> None:
+    """The real, empirically-confirmed regression this guards against
+    (docs/phases/phase-2-ocr-pipeline.md): QTextTableFormat's
+    layoutDirection does NOT reorder columns on its own — a table built
+    without the explicit reversal put the first-to-read cell on the
+    LEFT, which is backwards for Arabic. rows[0] is the first cell to
+    read, so it must land in the RIGHTMOST visual column (columns - 1),
+    not visual column 0.
+    """
+    rows = [[[TextSegment("first", 90.0)], [TextSegment("second", 90.0)], [TextSegment("third", 90.0)]]]
+    units = [DocumentUnit(kind="table", rows=rows)]
+    window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+    table = _first_table(window._text_edit)
+
+    assert _cell_text(table, 0, 2) == "first"  # rightmost visual column = first to read
+    assert _cell_text(table, 0, 1) == "second"
+    assert _cell_text(table, 0, 0) == "third"  # leftmost visual column = last to read
+
+
+def test_ragged_table_row_leaves_the_correct_visual_cell_empty(qtbot, document, sample_image) -> None:
+    """A short row (real messy tables have these — see _block_is_tabular)
+    is padded at the END of reading order, which for RTL is the LEFTMOST
+    visual column — verified explicitly rather than assumed, since this
+    is exactly the kind of off-by-one a manual index reversal can get
+    wrong silently."""
+    rows = [
+        [[TextSegment("A", 90.0)], [TextSegment("B", 90.0)], [TextSegment("C", 90.0)]],
+        [[TextSegment("1", 90.0)]],  # short row: only 1 of 3 columns
+    ]
+    units = [DocumentUnit(kind="table", rows=rows)]
+    window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+    table = _first_table(window._text_edit)
+
+    assert _cell_text(table, 1, 2) == "1"  # the only real cell, rightmost (first-to-read position)
+    assert _cell_text(table, 1, 1) == ""
+    assert _cell_text(table, 1, 0) == ""
+
+
+def test_heading_document_unit_renders_bold_and_larger(qtbot, document, sample_image) -> None:
+    units = [DocumentUnit(kind="heading", segments=[TextSegment("عنوان القسم", 90.0)])]
+    window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+    char_format = _char_format_at(window._text_edit, 0)
+    assert char_format.fontWeight() == QFont.Weight.Bold
+    assert char_format.fontPointSize() == _HEADING_FONT_POINT_SIZE
+
+
+def test_low_confidence_word_inside_a_heading_still_gets_highlighted(qtbot, document, sample_image) -> None:
+    """Confidence highlighting and heading styling combine — a heading
+    is not automatically trustworthy just because it was recognized as
+    one (see _char_format_for's docstring)."""
+    units = [DocumentUnit(kind="heading", segments=[TextSegment("مشكوك", 40.0)])]
+    window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+    char_format = _char_format_at(window._text_edit, 0)
+    assert char_format.fontWeight() == QFont.Weight.Bold  # still a heading
+    assert char_format.background().color().name() == _VERY_LOW_CONFIDENCE_COLOR.name()  # and still flagged
+
+
+def test_document_units_take_priority_over_flat_segments(qtbot, document, sample_image) -> None:
+    """document_units, when present, is used instead of the flatter
+    segments fallback — verified by rendering a heading (which only the
+    document_units path produces) and checking a real Qt table object is
+    NOT what's used for the plain-segments case (see
+    test_low_and_very_low_confidence_words_are_highlighted_distinctly
+    for the segments-only path this must not break)."""
+    result = OcrResult(
+        raw_text="placeholder",
+        segments=[TextSegment("fallback text, should not be shown", None)],
+        document_units=[DocumentUnit(kind="heading", segments=[TextSegment("العنوان الحقيقي", 90.0)])],
+    )
+    pool = _FakeOcrPool(result=result)
+    window = MainWindow(document, pool, _FakeScannerService())
+    qtbot.addWidget(window)
+
+    window._add_page(sample_image)
+    window._page_list.setCurrentRow(0)
+
+    assert window._text_edit.toPlainText() == "العنوان الحقيقي"
 
 
 def test_editing_text_calls_set_edited_text_not_raw_text(qtbot, document, sample_image) -> None:
@@ -264,7 +395,10 @@ def test_export_markdown_skips_pages_excluded_from_range(qtbot, document, sample
 def test_export_word_writes_a_real_docx_using_document_units(qtbot, document, sample_image, tmp_path: Path, monkeypatch) -> None:
     import docx
 
-    units = [DocumentUnit(kind="heading", text="عنوان"), DocumentUnit(kind="paragraph", text="نص الفقرة")]
+    units = [
+        DocumentUnit(kind="heading", segments=[TextSegment("عنوان", 90.0)]),
+        DocumentUnit(kind="paragraph", segments=[TextSegment("نص الفقرة", 90.0)]),
+    ]
     pool = _FakeOcrPool(result=OcrResult(raw_text="RAW", document_units=units))
     window = MainWindow(document, pool, _FakeScannerService())
     qtbot.addWidget(window)

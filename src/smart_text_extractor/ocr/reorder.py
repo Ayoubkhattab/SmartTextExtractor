@@ -252,10 +252,10 @@ def _split_line_into_column_runs(line: Line, gap_multiplier: float = 3.0) -> lis
     return [run for run in runs if run]
 
 
-def _line_segments_with_cell_separators(
-    line: Line, gap_multiplier: float = 4.0, min_gap_threshold: float = 40.0, separator: str = " | "
-) -> list[TextSegment]:
-    """Renders one already-ordered row as TextSegments, inserting
+def _line_cell_segments(
+    line: Line, gap_multiplier: float = 4.0, min_gap_threshold: float = 40.0
+) -> list[list[TextSegment]]:
+    """Splits one already-ordered row into per-cell TextSegment lists —
     `separator` (confidence None — it's punctuation, not a recognized
     word) at table-cell boundaries instead of a plain space — addresses a
     real, evidence-confirmed complaint (user report +
@@ -282,10 +282,16 @@ def _line_segments_with_cell_separators(
     module-level empirical finding), so gaps are measured directly on
     `line.words` in their existing order — re-sorting is unnecessary and
     would risk misreading which side of a gap is "first" for RTL rows.
+
+    This is the single source of truth for the gap-based cell-boundary
+    heuristic — _line_segments_with_cell_separators (flat text, used by
+    Markdown/raw_text) and classify_document_units's table rows (used by
+    Word export and the live UI's confidence-highlighted table view) are
+    both built on this, so the boundary decision can't drift between them.
     """
     words = line.words
     if len(words) <= 1:
-        return [TextSegment(w.text, w.confidence) for w in words]
+        return [[TextSegment(w.text, w.confidence) for w in words]]
 
     gaps = [
         max(a.rect.x, b.rect.x) - min(a.rect.x + a.rect.width, b.rect.x + b.rect.width)
@@ -293,10 +299,25 @@ def _line_segments_with_cell_separators(
     ]
     gap_threshold = max(min(gaps) * gap_multiplier, min_gap_threshold)
 
-    segments = [TextSegment(words[0].text, words[0].confidence)]
+    cells: list[list[TextSegment]] = [[TextSegment(words[0].text, words[0].confidence)]]
     for word, gap in zip(words[1:], gaps):
-        segments.append(TextSegment(separator if gap > gap_threshold else " ", None))
-        segments.append(TextSegment(word.text, word.confidence))
+        if gap > gap_threshold:
+            cells.append([])
+        else:
+            cells[-1].append(TextSegment(" ", None))
+        cells[-1].append(TextSegment(word.text, word.confidence))
+    return cells
+
+
+def _line_segments_with_cell_separators(
+    line: Line, gap_multiplier: float = 4.0, min_gap_threshold: float = 40.0, separator: str = " | "
+) -> list[TextSegment]:
+    cells = _line_cell_segments(line, gap_multiplier, min_gap_threshold)
+    segments: list[TextSegment] = []
+    for i, cell in enumerate(cells):
+        if i > 0:
+            segments.append(TextSegment(separator, None))
+        segments.extend(cell)
     return segments
 
 
@@ -494,13 +515,14 @@ def _block_is_tabular(block_lines: list[Line]) -> bool:
     return rows_with_a_cell_boundary / len(block_lines) > 0.5
 
 
-def _rows_to_markdown_table(rows: list[list[str]]) -> str:
+def _rows_to_markdown_table(rows: list[list[list[TextSegment]]]) -> str:
     """Ragged rows (a real, messy table can have a different cell count
     per row — see _block_is_tabular) are padded to the widest row with
     empty cells rather than truncated, so no recognized text is dropped
     just to keep the grid rectangular."""
-    column_count = max(len(row) for row in rows)
-    padded_rows = [row + [""] * (column_count - len(row)) for row in rows]
+    text_rows = [["".join(segment.text for segment in cell) for cell in row] for row in rows]
+    column_count = max(len(row) for row in text_rows)
+    padded_rows = [row + [""] * (column_count - len(row)) for row in text_rows]
     header, *data_rows = padded_rows
     table_lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(["---"] * column_count) + " |"]
     table_lines.extend("| " + " | ".join(row) + " |" for row in data_rows)
@@ -519,17 +541,19 @@ def _classify_plain_block(block_lines: list[Line], page_median_height: float) ->
     flag single-line blocks.
     """
     units: list[DocumentUnit] = []
-    paragraph_lines: list[str] = []
+    paragraph_segments: list[TextSegment] = []
     for line in block_lines:
         if _line_median_height(line) > page_median_height * _HEADING_HEIGHT_RATIO:
-            if paragraph_lines:
-                units.append(DocumentUnit(kind="paragraph", text="\n".join(paragraph_lines)))
-                paragraph_lines = []
-            units.append(DocumentUnit(kind="heading", text=line.text))
+            if paragraph_segments:
+                units.append(DocumentUnit(kind="paragraph", segments=paragraph_segments))
+                paragraph_segments = []
+            units.append(DocumentUnit(kind="heading", segments=_line_segments_with_cell_separators(line)))
         else:
-            paragraph_lines.append(_line_text_with_cell_separators(line))
-    if paragraph_lines:
-        units.append(DocumentUnit(kind="paragraph", text="\n".join(paragraph_lines)))
+            if paragraph_segments:
+                paragraph_segments.append(TextSegment("\n", None))
+            paragraph_segments.extend(_line_segments_with_cell_separators(line))
+    if paragraph_segments:
+        units.append(DocumentUnit(kind="paragraph", segments=paragraph_segments))
     return units
 
 
@@ -563,7 +587,8 @@ def classify_document_units(lines: list[Line]) -> list[DocumentUnit]:
     i = 0
     while i < len(blocks):
         block_lines = blocks[i]
-        is_isolated_tabular_line = len(block_lines) == 1 and len(_line_cells(block_lines[0])) > 1
+        header_row_cells = _line_cell_segments(block_lines[0]) if len(block_lines) == 1 else None
+        is_isolated_tabular_line = header_row_cells is not None and len(header_row_cells) > 1
         next_block_is_a_table = i + 1 < len(blocks) and _block_is_tabular(blocks[i + 1])
 
         if is_isolated_tabular_line and next_block_is_a_table:
@@ -574,13 +599,13 @@ def classify_document_units(lines: list[Line]) -> list[DocumentUnit]:
             # the data rows below it. Fold it in as the header instead of
             # letting the table below fall back to using its own first
             # data row as a stand-in header.
-            rows = [_line_cells(block_lines[0])] + [_line_cells(line) for line in blocks[i + 1]]
+            rows = [header_row_cells] + [_line_cell_segments(line) for line in blocks[i + 1]]
             units.append(DocumentUnit(kind="table", rows=rows))
             i += 2
             continue
 
         if _block_is_tabular(block_lines):
-            units.append(DocumentUnit(kind="table", rows=[_line_cells(line) for line in block_lines]))
+            units.append(DocumentUnit(kind="table", rows=[_line_cell_segments(line) for line in block_lines]))
         else:
             units.extend(_classify_plain_block(block_lines, page_median_height))
         i += 1
@@ -592,9 +617,9 @@ def assemble_markdown(lines: list[Line]) -> str:
     rendered_units: list[str] = []
     for unit in classify_document_units(lines):
         if unit.kind == "heading":
-            rendered_units.append(f"## {unit.text}")
+            rendered_units.append(f"## {''.join(segment.text for segment in unit.segments)}")
         elif unit.kind == "table":
             rendered_units.append(_rows_to_markdown_table(unit.rows))
         else:
-            rendered_units.append(unit.text)
+            rendered_units.append("".join(segment.text for segment in unit.segments))
     return "\n\n".join(rendered_units)

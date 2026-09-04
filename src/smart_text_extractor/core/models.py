@@ -74,20 +74,28 @@ class TextSegment:
 @dataclass
 class DocumentUnit:
     """One structural unit of a page's content, classified for structured
-    export (§7.1.1) — a heading, a table, or a paragraph. Produced once
+    output (§7.1.1) — a heading, a table, or a paragraph. Produced once
     (smart_text_extractor.ocr.reorder.classify_document_units) and shared
-    by every structured-export renderer (Markdown, Word/docx, ...) so the
-    table/heading classification logic lives in exactly one place instead
-    of being re-implemented — or re-parsed back out of a rendered string
-    — per export format. Lives here rather than in reorder.py because
-    OcrResult (below) needs to reference it without reorder.py's OCR-
-    pipeline internals (Line, block_num grouping) becoming part of the
-    domain model.
+    by every structured renderer — Markdown export, Word/docx export, and
+    the live extracted-text panel in the UI — so the table/heading
+    classification logic lives in exactly one place instead of being
+    re-implemented, or re-parsed back out of a rendered string, per
+    consumer. Lives here rather than in reorder.py because OcrResult
+    (below) needs to reference it without reorder.py's OCR-pipeline
+    internals (Line, block_num grouping) becoming part of the domain
+    model.
+
+    Content is TextSegments, not plain strings, for the same reason
+    OcrResult.segments is: it lets the live UI panel render real
+    structure (an actual table grid, a visually distinct heading) while
+    still coloring each word by its own confidence — a table row or
+    heading is not automatically "fully trustworthy" just because it was
+    recognized as one.
     """
 
     kind: str  # "heading" | "table" | "paragraph"
-    text: str = ""  # heading text, or a paragraph's lines joined by "\n"
-    rows: list[list[str]] = field(default_factory=list)  # table cell rows; unused outside kind == "table"
+    segments: list[TextSegment] = field(default_factory=list)  # heading/paragraph content; unused for kind == "table"
+    rows: list[list[list[TextSegment]]] = field(default_factory=list)  # table cell rows (each cell its own segment list); unused outside kind == "table"
 
 
 @dataclass

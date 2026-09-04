@@ -46,6 +46,7 @@ from smart_text_extractor.core.models import (
     OcrResult,
     OcrStatus,
     Page,
+    PageLockedError,
     PdfPageSource,
     TextSegment,
 )
@@ -113,6 +114,17 @@ class _OcrBridge(QObject):
     page_done = pyqtSignal(object, object)
 
 
+def _status_label(page: Page) -> str:
+    """The one place a page's state becomes user-facing text, so the list
+    reads the same however the item was built (fresh, redrawn after an
+    undo, or updated when OCR finished)."""
+    if page.ocr_status == OcrStatus.DONE:
+        return "تم ✓"
+    if page.ocr_status == OcrStatus.FAILED:
+        return "فشل"
+    return "قيد المعالجة"
+
+
 def _card(title: str, content: QWidget) -> QFrame:
     """A titled panel — used for the image preview and the text editor so
     the window reads as distinct sections instead of two bare widgets
@@ -139,6 +151,7 @@ class MainWindow(QMainWindow):
         self._ocr_pool = ocr_pool
         self._scanner_service = scanner_service
         self._suppress_text_changed = False
+        self._suppress_item_changed = False
 
         self._bridge = _OcrBridge()
         self._bridge.page_done.connect(self._on_page_done)
@@ -176,10 +189,30 @@ class MainWindow(QMainWindow):
         export_markdown_action.triggered.connect(self._on_export_markdown)
         toolbar.addAction(export_markdown_action)
 
+        toolbar.addSeparator()
+
+        self._retry_action = QAction("أعد معالجة الصفحة", self)
+        self._retry_action.triggered.connect(self._on_retry_page)
+        self._retry_action.setEnabled(False)
+        toolbar.addAction(self._retry_action)
+
+        self._undo_reorder_action = QAction("تراجع عن الترتيب", self)
+        self._undo_reorder_action.triggered.connect(self._on_undo_reorder)
+        self._undo_reorder_action.setEnabled(False)
+        toolbar.addAction(self._undo_reorder_action)
+
     def _build_central_widget(self) -> None:
         self._page_list = QListWidget()
         self._page_list.setIconSize(QSize(self._THUMBNAIL_SIZE, self._THUMBNAIL_SIZE))
         self._page_list.currentRowChanged.connect(self._on_page_selected)
+        # US-07: drag to reorder. InternalMove lets Qt do the visual move;
+        # _on_rows_moved then applies it to the Document, which is what
+        # enforces the "a page mid-OCR can't be moved" rule (§3.1).
+        self._page_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self._page_list.model().rowsMoved.connect(self._on_rows_moved)
+        # US-08: the checkbox is the page-range selection — an unchecked
+        # page is excluded from every export.
+        self._page_list.itemChanged.connect(self._on_page_item_changed)
         pages_card = _card("الصفحات", self._page_list)
         pages_card.setMinimumWidth(220)
         pages_card.setMaximumWidth(320)
@@ -356,8 +389,10 @@ class MainWindow(QMainWindow):
     ) -> None:
         page = self._document.add_page(image_path)
         page.pdf_source = pdf_source
-        item = QListWidgetItem(self._thumbnail_icon(image_path), f"{image_path.name}\nقيد المعالجة")
+        self._suppress_item_changed = True
+        item = self._page_list_item(page)
         self._page_list.addItem(item)
+        self._suppress_item_changed = False
         index = self._page_list.count() - 1
         self._page_list.setCurrentRow(index)
 
@@ -376,6 +411,77 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"تجري معالجة {image_path.name}...")
         self._ocr_pool.submit(page, lambda p, err: self._bridge.page_done.emit(p, err))
 
+    def _on_rows_moved(self, *_args) -> None:
+        """Applies a finished drag to the Document (US-07).
+
+        Document.reorder_pages is the authority, not the list widget: it
+        refuses to move a page that is mid-OCR (§3.1). When it does, the
+        visual move is undone so the list can never show an order the
+        document doesn't actually have.
+        """
+        new_order = [
+            self._page_list.item(row).data(Qt.ItemDataRole.UserRole) for row in range(self._page_list.count())
+        ]
+        try:
+            self._document.reorder_pages(new_order)
+        except PageLockedError:
+            # Status bar, not a modal dialog: this fires as the user
+            # releases a drag, and a modal there interrupts the gesture
+            # itself (it also deadlocks any headless test that triggers
+            # this path). The list snapping back is the real feedback.
+            self._rebuild_page_list()
+            self.statusBar().showMessage("لا يمكن تحريك صفحة أثناء استخلاص نصها — انتظر انتهاءها ثم أعد المحاولة.")
+            return
+        self._undo_reorder_action.setEnabled(True)
+        self.statusBar().showMessage("تم تغيير ترتيب الصفحات")
+
+    def _on_undo_reorder(self) -> None:
+        if self._document.undo_reorder():
+            self._rebuild_page_list()
+            self.statusBar().showMessage("تم التراجع عن آخر ترتيب")
+        self._undo_reorder_action.setEnabled(False)
+
+    def _rebuild_page_list(self) -> None:
+        """Redraws the list from the Document — used after an undo or a
+        rejected drag, so the two can never disagree."""
+        self._suppress_item_changed = True
+        selected_row = self._page_list.currentRow()
+        self._page_list.clear()
+        for page in self._document.pages:
+            self._page_list.addItem(self._page_list_item(page))
+        self._suppress_item_changed = False
+        if 0 <= selected_row < self._page_list.count():
+            self._page_list.setCurrentRow(selected_row)
+
+    def _page_list_item(self, page: Page) -> QListWidgetItem:
+        item = QListWidgetItem(self._thumbnail_icon(page.image_path), f"{page.image_path.name}\n{_status_label(page)}")
+        item.setData(Qt.ItemDataRole.UserRole, page.id)
+        item.setCheckState(Qt.CheckState.Checked if page.included_in_range else Qt.CheckState.Unchecked)
+        return item
+
+    def _on_page_item_changed(self, item: QListWidgetItem) -> None:
+        if self._suppress_item_changed:
+            return
+        page_id = item.data(Qt.ItemDataRole.UserRole)
+        for page in self._document.pages:
+            if page.id == page_id:
+                page.included_in_range = item.checkState() == Qt.CheckState.Checked
+                break
+
+    def _on_retry_page(self) -> None:
+        """Re-runs a page that failed (§3.2's manual retry). Skip-and-Continue
+        already left the rest of the batch alone; this is what lets the user
+        pick that one page back up."""
+        row = self._page_list.currentRow()
+        if row < 0:
+            return
+        page = self._document.pages[row]
+        page.ocr_status = OcrStatus.PENDING
+        self._page_list.item(row).setText(f"{page.image_path.name}\nقيد المعالجة")
+        self._retry_action.setEnabled(False)
+        self.statusBar().showMessage(f"تجري إعادة معالجة {page.image_path.name}...")
+        self._ocr_pool.submit(page, lambda p, err: self._bridge.page_done.emit(p, err))
+
     def _thumbnail_icon(self, image_path: Path) -> QIcon:
         pixmap = QPixmap(str(image_path))
         if pixmap.isNull():
@@ -391,20 +497,24 @@ class MainWindow(QMainWindow):
     def _on_page_done(self, page: Page, error: Exception | None) -> None:
         index = self._document.pages.index(page)
         item = self._page_list.item(index)
-        if error is not None:
-            item.setText(f"{page.image_path.name}\nفشل ({error})")
-        else:
-            item.setText(f"{page.image_path.name}\nتم ✓")
+        self._suppress_item_changed = True
+        suffix = f" ({error})" if error is not None else ""
+        item.setText(f"{page.image_path.name}\n{_status_label(page)}{suffix}")
+        self._suppress_item_changed = False
         self.statusBar().showMessage(
             f"اكتملت معالجة {page.image_path.name}" if error is None else f"فشلت معالجة {page.image_path.name}"
         )
         if self._page_list.currentRow() == index:
             self._refresh_detail_panel(page)
+            self._retry_action.setEnabled(page.ocr_status == OcrStatus.FAILED)
 
     def _on_page_selected(self, row: int) -> None:
         if row < 0 or row >= len(self._document.pages):
+            self._retry_action.setEnabled(False)
             return
-        self._refresh_detail_panel(self._document.pages[row])
+        page = self._document.pages[row]
+        self._retry_action.setEnabled(page.ocr_status == OcrStatus.FAILED)
+        self._refresh_detail_panel(page)
 
     def _char_format_for(self, confidence: float | None, *, heading: bool = False) -> QTextCharFormat:
         """The one place confidence-highlighting is decided, shared by
@@ -531,6 +641,7 @@ class MainWindow(QMainWindow):
         self._text_edit.moveCursor(QTextCursor.MoveOperation.Start)
         self._text_edit.verticalScrollBar().setValue(0)
         self._suppress_text_changed = False
+        self._suppress_item_changed = False
 
     def _on_text_edited(self) -> None:
         if self._suppress_text_changed:

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QTextCursor
 
 from smart_text_extractor.core.models import Document, DocumentUnit, OcrResult, OcrStatus, SourceType, TextSegment
@@ -520,3 +521,86 @@ def test_opening_a_broken_pdf_shows_a_warning_not_a_crash(qtbot, document, tmp_p
 
     assert len(shown) == 1
     assert len(document.pages) == 0
+
+
+class TestPageManagementWiring:
+    """US-07 (reorder + undo), US-08 (page range) and manual retry (§3.2)
+    all had working, tested domain logic with no way for a user to reach
+    it. These prove the UI actually drives that logic."""
+
+    def _window_with_pages(self, qtbot, document, tmp_path, count=3):
+        from PIL import Image
+
+        pool = _FakeOcrPool()
+        window = MainWindow(document, pool, _FakeScannerService())
+        qtbot.addWidget(window)
+        for i in range(count):
+            path = tmp_path / f"page{i}.png"
+            Image.new("RGB", (60, 40), "white").save(path)
+            window._add_page(path)
+        return window
+
+    def test_dragging_a_page_reorders_the_document(self, qtbot, document, tmp_path) -> None:
+        window = self._window_with_pages(qtbot, document, tmp_path)
+        original = [page.id for page in document.pages]
+
+        # what Qt leaves behind after an InternalMove drag: the list rows
+        # are already in the new order, then rowsMoved fires.
+        item = window._page_list.takeItem(0)
+        window._page_list.insertItem(2, item)
+        window._on_rows_moved()
+
+        assert [page.id for page in document.pages] == [original[1], original[2], original[0]]
+
+    def test_reordering_a_page_that_is_mid_ocr_is_refused_and_the_list_is_restored(
+        self, qtbot, document, tmp_path
+    ) -> None:
+        window = self._window_with_pages(qtbot, document, tmp_path)
+        original = [page.id for page in document.pages]
+        document.pages[0].ocr_status = OcrStatus.PROCESSING  # §3.1: locked
+
+        item = window._page_list.takeItem(0)
+        window._page_list.insertItem(2, item)
+        window._on_rows_moved()
+
+        assert [page.id for page in document.pages] == original  # document untouched
+        listed = [window._page_list.item(r).data(Qt.ItemDataRole.UserRole) for r in range(3)]
+        assert listed == original  # and the list was put back to match it
+
+    def test_undo_restores_the_previous_order(self, qtbot, document, tmp_path) -> None:
+        window = self._window_with_pages(qtbot, document, tmp_path)
+        original = [page.id for page in document.pages]
+
+        item = window._page_list.takeItem(0)
+        window._page_list.insertItem(2, item)
+        window._on_rows_moved()
+        window._on_undo_reorder()
+
+        assert [page.id for page in document.pages] == original
+        assert [window._page_list.item(r).data(Qt.ItemDataRole.UserRole) for r in range(3)] == original
+
+    def test_unchecking_a_page_excludes_it_from_export(self, qtbot, document, tmp_path) -> None:
+        window = self._window_with_pages(qtbot, document, tmp_path)
+        assert len(window._exportable_pages()) == 3
+
+        window._page_list.item(1).setCheckState(Qt.CheckState.Unchecked)
+
+        assert document.pages[1].included_in_range is False
+        assert len(window._exportable_pages()) == 2
+
+    def test_retry_is_offered_only_for_a_failed_page_and_resubmits_it(self, qtbot, document, tmp_path) -> None:
+        from PIL import Image
+
+        pool = _FakeOcrPool(error=RuntimeError("boom"))
+        window = MainWindow(document, pool, _FakeScannerService())
+        qtbot.addWidget(window)
+        path = tmp_path / "failing.png"
+        Image.new("RGB", (60, 40), "white").save(path)
+        window._add_page(path)
+
+        assert window._retry_action.isEnabled() is True
+        submitted_before = len(pool.submitted_pages)
+
+        window._on_retry_page()
+
+        assert len(pool.submitted_pages) == submitted_before + 1

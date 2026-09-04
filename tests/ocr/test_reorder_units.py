@@ -685,3 +685,46 @@ class TestDocumentUnitsToMarkdownAndSegments:
 
     def test_document_units_to_segments_on_empty_units_returns_empty_list(self) -> None:
         assert document_units_to_segments([]) == []
+
+
+class TestRowsAreJoinedNotJustOrdered:
+    """A source line routinely arrives as several pieces — justified text
+    split at its gap, a line split around embedded Latin. Ordering them was
+    not enough: emitting each piece as its own line broke every paragraph
+    into a column of short fragments."""
+
+    def _row_pieces(self) -> list[Line]:
+        """One visual row at y=100, delivered right-to-left as three pieces.
+
+        Proportions matter and are taken from a real line: pieces that span
+        a text column with ordinary word gaps between them. An earlier
+        version of this fixture used narrow pieces 30px apart, which
+        _cluster_columns_and_order correctly reads as three separate
+        COLUMNS — the fixture was wrong, not the code."""
+        return [
+            Line(words=[BoundingBox("الدفعة", Rect(350, 100, 170, 20), 100.0)], block_num=1, par_num=0, line_num=1),
+            Line(words=[BoundingBox("الأحداث", Rect(200, 100, 140, 20), 100.0)], block_num=1, par_num=0, line_num=2),
+            Line(words=[BoundingBox("التاريخية", Rect(70, 100, 120, 20), 100.0)], block_num=1, par_num=0, line_num=3),
+        ]
+
+    def test_pieces_of_one_row_become_one_line(self) -> None:
+        ordered = order_lines_reading_order(self._row_pieces())
+
+        assert len(ordered) == 1
+        assert [w.text for w in ordered[0].words] == ["الدفعة", "الأحداث", "التاريخية"]
+
+    def test_the_joined_line_assembles_as_one_line_of_text(self) -> None:
+        text = assemble_text(order_lines_reading_order(self._row_pieces()))
+
+        assert "\n" not in text
+        assert text == "الدفعة الأحداث التاريخية"
+
+    def test_genuinely_separate_rows_stay_separate(self) -> None:
+        rows = [
+            Line(words=[BoundingBox("أول", Rect(70, 100, 450, 20), 100.0)], block_num=1, par_num=0, line_num=1),
+            Line(words=[BoundingBox("ثان", Rect(70, 200, 450, 20), 100.0)], block_num=1, par_num=0, line_num=2),
+        ]
+
+        ordered = order_lines_reading_order(rows)
+
+        assert len(ordered) == 2

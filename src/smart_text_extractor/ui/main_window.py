@@ -59,6 +59,7 @@ from smart_text_extractor.core.pdf_import import (
 )
 from smart_text_extractor.export.docx_export import PageContent, export_docx
 from smart_text_extractor.export.pdf_export import SearchablePage, export_searchable_pdf
+from smart_text_extractor.ocr.reorder import _is_majority_arabic
 from smart_text_extractor.scanner.service import ScannerService
 
 _TEXT_COLOR = "#1a1d21"
@@ -135,6 +136,14 @@ def _status_label(page: Page) -> str:
     if page.ocr_status == OcrStatus.FAILED:
         return "فشل"
     return "قيد المعالجة"
+
+
+def _unit_plain_text(unit: DocumentUnit) -> str:
+    """The unit's text, whatever kind it is — used only to decide which
+    edge the block should start from."""
+    if unit.kind != "table":
+        return "".join(segment.text for segment in unit.segments)
+    return " ".join(segment.text for row in unit.rows for cell in row for segment in cell)
 
 
 def _dominant_highlight(segments: list[TextSegment]) -> str | None:
@@ -811,7 +820,7 @@ class MainWindow(QMainWindow):
         for index, unit in enumerate(units):
             if index > 0:
                 cursor.insertBlock()
-            self._apply_alignment(cursor, unit.alignment)
+            self._apply_alignment(cursor, unit.alignment, _unit_plain_text(unit))
             if unit.kind == "heading":
                 self._insert_segments(cursor, unit.segments, heading=True)
             elif unit.kind == "table":
@@ -820,15 +829,29 @@ class MainWindow(QMainWindow):
                 self._insert_segments(cursor, unit.segments)
 
     @staticmethod
-    def _apply_alignment(cursor: QTextCursor, alignment: str) -> None:
-        """A unit measured as centred on the page is centred here too; every
-        other unit keeps the text's own direction, which for this RTL-first
-        window means right-aligned Arabic and left-aligned Latin without
-        either being forced."""
+    def _apply_alignment(cursor: QTextCursor, alignment: str, text: str = "") -> None:
+        """Aligns a block to the edge its own script starts from.
+
+        Qt.AlignAbsolute was used here and is not a horizontal alignment at
+        all — its value carries none of the Left/Right/HCenter bits, it only
+        means "treat Left and Right as physical". Set alone it left the
+        block with no alignment, so every paragraph fell back to the LEFT
+        edge: Arabic text began nowhere near the right margin and the whole
+        page read as though it had been pushed sideways.
+
+        The direction is taken from the text rather than from the window,
+        so an English block inside an Arabic document still starts on the
+        left where it belongs.
+        """
         block_format = cursor.blockFormat()
-        block_format.setAlignment(
-            Qt.AlignmentFlag.AlignHCenter if alignment == "center" else Qt.AlignmentFlag.AlignAbsolute
-        )
+        if alignment == "center":
+            block_format.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        elif _is_majority_arabic(text):
+            block_format.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+            block_format.setAlignment(Qt.AlignmentFlag.AlignRight)
+        else:
+            block_format.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+            block_format.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignAbsolute)
         cursor.setBlockFormat(block_format)
 
     def _refresh_detail_panel(self, page: Page) -> None:

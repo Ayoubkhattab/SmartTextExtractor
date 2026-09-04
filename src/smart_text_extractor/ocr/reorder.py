@@ -409,8 +409,35 @@ def _rows_in_reading_order(lines: list[Line], rtl_page: bool) -> list[Line]:
 
     ordered: list[Line] = []
     for row in rows:
-        ordered.extend(sorted(row, key=lambda item: item.rect.x, reverse=rtl_page))
+        in_reading_order = sorted(row, key=lambda item: item.rect.x, reverse=rtl_page)
+        ordered.append(_join_row(in_reading_order))
     return ordered
+
+
+def _join_row(pieces: list[Line]) -> Line:
+    """Merges the pieces of one visual row into the single line it is.
+
+    Ordering them was not enough. A source line routinely arrives as
+    several pieces — justified text split at its gap, a line split around
+    embedded Latin — and emitting each piece as its own line broke every
+    paragraph into a column of short fragments: "الدفعة : الأحداث" /
+    "التاريخية وطبقات البنية" / "التحتية والتركيبة" where the page has one
+    flowing sentence.
+
+    Safe to join here specifically because this runs per column, after
+    _cluster_columns_and_order has already separated genuinely different
+    columns — so pieces sharing a row within one column really are one
+    line, not two columns' worth of text at the same height.
+    """
+    if len(pieces) == 1:
+        return pieces[0]
+    first = pieces[0]
+    return Line(
+        words=[word for piece in pieces for word in piece.words],
+        block_num=first.block_num,
+        par_num=first.par_num,
+        line_num=first.line_num,
+    )
 
 
 def order_lines_reading_order(lines: list[Line], column_gap_ratio: float = 0.08) -> list[Line]:

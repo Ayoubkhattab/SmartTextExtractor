@@ -613,3 +613,53 @@ def test_review_marks_are_off_by_default_so_the_page_matches_its_source(qtbot, d
     window._confidence_action.setChecked(True)
 
     assert _char_format_at(window._text_edit, 0).background().color().name() == _VERY_LOW_CONFIDENCE_COLOR.name()
+
+
+class TestBlockDirectionAndAlignment:
+    """Regression guard for a defect this project shipped: blocks were given
+    Qt.AlignAbsolute as their alignment, which carries none of the
+    Left/Right/HCenter bits — so every paragraph fell back to the LEFT edge
+    and Arabic text began nowhere near the right margin."""
+
+    def _first_block_format(self, window):
+        return window._text_edit.document().findBlockByNumber(0).blockFormat()
+
+    def test_an_arabic_block_starts_at_the_right_margin(self, qtbot, document, sample_image) -> None:
+        units = [DocumentUnit(kind="paragraph", segments=[TextSegment("هذا الدليل موجّه لجميع الموظفين", 100.0)])]
+        window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+        block_format = self._first_block_format(window)
+
+        assert block_format.alignment() & Qt.AlignmentFlag.AlignRight
+        assert block_format.layoutDirection() == Qt.LayoutDirection.RightToLeft
+
+    def test_a_latin_block_starts_at_the_left_margin(self, qtbot, document, sample_image) -> None:
+        """Direction follows the text, not the window: an English block in an
+        Arabic document still begins on the left."""
+        units = [DocumentUnit(kind="paragraph", segments=[TextSegment("Storage Path and Custom Field", 100.0)])]
+        window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+        block_format = self._first_block_format(window)
+
+        assert block_format.alignment() & Qt.AlignmentFlag.AlignLeft
+        assert block_format.layoutDirection() == Qt.LayoutDirection.LeftToRight
+
+    def test_a_centred_unit_is_still_centred(self, qtbot, document, sample_image) -> None:
+        units = [DocumentUnit(kind="heading", segments=[TextSegment("عنوان", 100.0)], alignment="center")]
+        window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+        assert self._first_block_format(window).alignment() & Qt.AlignmentFlag.AlignHCenter
+
+    def test_no_block_is_left_without_a_horizontal_alignment(self, qtbot, document, sample_image) -> None:
+        """The exact shape of the original defect: an alignment value with no
+        horizontal bit set at all."""
+        horizontal = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignHCenter
+        units = [
+            DocumentUnit(kind="paragraph", segments=[TextSegment("نص عربي", 100.0)]),
+            DocumentUnit(kind="heading", segments=[TextSegment("عنوان", 100.0)], alignment="center"),
+        ]
+        window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+        for number in range(2):
+            block_format = window._text_edit.document().findBlockByNumber(number).blockFormat()
+            assert block_format.alignment() & horizontal, f"block {number} has no horizontal alignment"

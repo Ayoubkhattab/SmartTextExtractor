@@ -2,14 +2,16 @@
 test_engine.py/test_reorder.py which exercise the real binary."""
 from __future__ import annotations
 
-from smart_text_extractor.core.models import BoundingBox, Rect
+from smart_text_extractor.core.models import BoundingBox, Rect, TextSegment
 from smart_text_extractor.ocr.reorder import (
     Line,
     _is_majority_arabic,
     _is_mostly_latin,
+    _line_segments_with_cell_separators,
     _line_text_with_cell_separators,
     _split_line_into_column_runs,
     assemble_text,
+    assemble_text_segments,
     group_into_lines,
     merge_dual_language_passes,
     order_lines_reading_order,
@@ -317,3 +319,72 @@ class TestAssembleTextParagraphSpacing:
 
     def test_empty_lines_list_returns_empty_string(self) -> None:
         assert assemble_text([]) == ""
+
+
+class TestSegments:
+    """Regression tests for the segment-based representation added so the
+    UI can highlight low-confidence words (§7.1.1): word segments carry
+    confidence, every separator (space, " | ", "\\n", "\\n\\n") carries
+    None, and concatenating every segment's text must always reproduce
+    exactly what the plain-string functions return — the two must never
+    be able to drift apart, since the UI renders one and edits the other.
+    """
+
+    def test_line_segments_mark_words_with_confidence_and_separators_with_none(self) -> None:
+        line = Line(
+            words=[
+                BoundingBox("First", Rect(0, 0, 60, 20), 91.0),
+                BoundingBox("Second", Rect(70, 0, 60, 20), 42.0),
+            ],
+            block_num=1,
+            par_num=0,
+            line_num=1,
+        )
+
+        segments = _line_segments_with_cell_separators(line)
+
+        assert segments == [
+            TextSegment("First", 91.0),
+            TextSegment(" ", None),
+            TextSegment("Second", 42.0),
+        ]
+
+    def test_line_segments_concatenation_matches_the_string_function(self) -> None:
+        real_row = [
+            ("تخطيط", 2135, 104),
+            ("الدورة", 2039, 84),
+            ("بداية", 1799, 67),  # real cell boundary here (173px gap)
+        ]
+        line = Line(
+            words=[BoundingBox(text, Rect(left, 1325, width, 37), 90.0) for text, left, width in real_row],
+            block_num=10,
+            par_num=1,
+            line_num=1,
+        )
+
+        segments = _line_segments_with_cell_separators(line)
+
+        assert "".join(s.text for s in segments) == _line_text_with_cell_separators(line)
+        assert segments[1] == TextSegment(" ", None)  # within the "تخطيط الدورة" cell
+        assert segments[3] == TextSegment(" | ", None)  # the real cell boundary
+
+    def test_assemble_text_segments_concatenation_matches_assemble_text(self) -> None:
+        lines = [
+            Line(words=[BoundingBox("a", Rect(0, 0, 10, 10), 90.0)], block_num=1, par_num=0, line_num=1),
+            Line(words=[BoundingBox("b", Rect(0, 20, 10, 10), 30.0)], block_num=1, par_num=0, line_num=2),
+            Line(words=[BoundingBox("c", Rect(0, 50, 10, 10), 90.0)], block_num=2, par_num=0, line_num=1),
+        ]
+
+        segments = assemble_text_segments(lines)
+
+        assert "".join(s.text for s in segments) == assemble_text(lines) == "a\nb\n\nc"
+        assert segments == [
+            TextSegment("a", 90.0),
+            TextSegment("\n", None),
+            TextSegment("b", 30.0),
+            TextSegment("\n\n", None),
+            TextSegment("c", 90.0),
+        ]
+
+    def test_assemble_text_segments_on_empty_lines_returns_empty_list(self) -> None:
+        assert assemble_text_segments([]) == []

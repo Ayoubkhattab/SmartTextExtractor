@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from smart_text_extractor.core.models import Document, OcrResult, OcrStatus, SourceType
+from PyQt6.QtGui import QTextCursor
+
+from smart_text_extractor.core.models import Document, OcrResult, OcrStatus, SourceType, TextSegment
 from smart_text_extractor.scanner.models import ScannerDeviceInfo
 from smart_text_extractor.ui.main_window import MainWindow
 
@@ -99,6 +101,37 @@ def test_selecting_a_done_page_shows_its_extracted_text(qtbot, document, sample_
 
     assert window._text_edit.toPlainText() == "the extracted text"
     assert window._text_edit.isReadOnly() is False
+
+
+def _char_format_at(text_edit, position: int):
+    cursor = QTextCursor(text_edit.document())
+    cursor.setPosition(position)
+    cursor.setPosition(position + 1, QTextCursor.MoveMode.KeepAnchor)
+    return cursor.charFormat()
+
+
+def test_low_and_very_low_confidence_words_are_highlighted_distinctly(qtbot, document, sample_image) -> None:
+    segments = [
+        TextSegment("Good", 95.0),  # >= 75: no highlight
+        TextSegment(" ", None),  # separator: never highlighted regardless of neighbors
+        TextSegment("Iffy", 60.0),  # 50-75: low-confidence highlight
+        TextSegment(" ", None),
+        TextSegment("Bad", 40.0),  # < 50: very-low-confidence highlight
+    ]
+    result = OcrResult(raw_text="Good Iffy Bad", segments=segments)
+    pool = _FakeOcrPool(result=result)
+    window = MainWindow(document, pool, _FakeScannerService())
+    qtbot.addWidget(window)
+
+    window._add_page(sample_image)
+    window._page_list.setCurrentRow(0)
+
+    assert window._text_edit.toPlainText() == "Good Iffy Bad"
+    from smart_text_extractor.ui.main_window import _LOW_CONFIDENCE_COLOR, _VERY_LOW_CONFIDENCE_COLOR
+
+    assert _char_format_at(window._text_edit, 0).background().color().name() != _LOW_CONFIDENCE_COLOR.name()
+    assert _char_format_at(window._text_edit, 5).background().color().name() == _LOW_CONFIDENCE_COLOR.name()
+    assert _char_format_at(window._text_edit, 10).background().color().name() == _VERY_LOW_CONFIDENCE_COLOR.name()
 
 
 def test_editing_text_calls_set_edited_text_not_raw_text(qtbot, document, sample_image) -> None:

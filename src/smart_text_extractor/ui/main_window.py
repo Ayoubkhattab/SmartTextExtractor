@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon, QPixmap
+from PyQt6.QtGui import QAction, QColor, QIcon, QPixmap, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -30,11 +30,26 @@ from PyQt6.QtWidgets import (
 )
 
 from smart_text_extractor.concurrency.ocr_worker_pool import OcrWorkerPool
-from smart_text_extractor.core.models import Document, OcrStatus, Page
+from smart_text_extractor.core.models import Document, OcrStatus, Page, TextSegment
 from smart_text_extractor.core.pdf_import import render_pdf_to_images
 from smart_text_extractor.scanner.service import ScannerService
 
 _TEXT_COLOR = "#1a1d21"
+
+# Confidence-highlighting thresholds (§7.1.1): a word below
+# _LOW_CONFIDENCE_THRESHOLD is flagged yellow, below
+# _VERY_LOW_CONFIDENCE_THRESHOLD flagged red — lets the user spot-check
+# exactly the uncertain spots instead of proofreading the whole page.
+# Calibrated against real confidence numbers seen across this session's
+# three real test documents: correctly-recognized words clustered 85-96%,
+# while confirmed real misreads measured 33-66% (see
+# docs/phases/phase-2-ocr-pipeline.md) — 75%/50% sit between those
+# clusters without needing to be exact, since this is a review aid for
+# the user, not an automatic correction.
+_LOW_CONFIDENCE_THRESHOLD = 75.0
+_VERY_LOW_CONFIDENCE_THRESHOLD = 50.0
+_LOW_CONFIDENCE_COLOR = QColor("#fdf0b5")
+_VERY_LOW_CONFIDENCE_COLOR = QColor("#f8c9c9")
 
 _STYLESHEET = f"""
 QMainWindow, QWidget {{ background-color: #f4f5f7; color: {_TEXT_COLOR}; font-family: "Segoe UI", "Tahoma", sans-serif; font-size: 13px; }}
@@ -51,6 +66,7 @@ QFrame#card {{ background-color: #ffffff; border: 1px solid #dde1e6; border-radi
 QLabel#cardTitle {{ color: #5b6472; font-weight: 600; padding: 8px 12px; border-bottom: 1px solid #eceff2; }}
 QLabel#imagePreview {{ color: #9aa2ad; }}
 QTextEdit {{ background-color: #ffffff; color: {_TEXT_COLOR}; border: none; padding: 12px; font-size: 14px; selection-background-color: #b9d0fb; }}
+QLabel#confidenceLegend {{ color: #5b6472; font-size: 12px; padding: 6px 12px; border-bottom: 1px solid #eceff2; }}
 QSplitter::handle {{ background-color: #f4f5f7; width: 6px; }}
 """
 
@@ -139,7 +155,23 @@ class MainWindow(QMainWindow):
         self._text_edit = QTextEdit()
         self._text_edit.setPlaceholderText("سيظهر النص المستخرج هنا بعد المعالجة...")
         self._text_edit.textChanged.connect(self._on_text_edited)
-        text_card = _card("النص المستخرج", self._text_edit)
+
+        legend = QLabel(
+            f'<span style="background-color:{_VERY_LOW_CONFIDENCE_COLOR.name()};">&nbsp;&nbsp;</span>'
+            "&nbsp;ثقة منخفضة جداً&nbsp;&nbsp;&nbsp;"
+            f'<span style="background-color:{_LOW_CONFIDENCE_COLOR.name()};">&nbsp;&nbsp;</span>'
+            "&nbsp;ثقة منخفضة — يُفضَّل مراجعتها"
+        )
+        legend.setObjectName("confidenceLegend")
+
+        text_panel = QWidget()
+        text_panel_layout = QVBoxLayout(text_panel)
+        text_panel_layout.setContentsMargins(0, 0, 0, 0)
+        text_panel_layout.setSpacing(0)
+        text_panel_layout.addWidget(legend)
+        text_panel_layout.addWidget(self._text_edit, stretch=1)
+
+        text_card = _card("النص المستخرج", text_panel)
 
         right_split = QSplitter(Qt.Orientation.Horizontal)
         right_split.addWidget(image_card)
@@ -233,6 +265,29 @@ class MainWindow(QMainWindow):
             return
         self._refresh_detail_panel(self._document.pages[row])
 
+    def _render_segments(self, segments: list[TextSegment]) -> None:
+        """Paints OcrResult.segments into the text editor, giving each
+        word a background color keyed to its recognition confidence.
+        Concatenating segment.text in order is exactly raw_text (see
+        TextSegment's docstring), so this is purely a formatting pass —
+        it does not change what toPlainText() returns once the user
+        starts editing."""
+        self._text_edit.clear()
+        cursor = QTextCursor(self._text_edit.document())
+        plain_format = QTextCharFormat()
+        low_format = QTextCharFormat()
+        low_format.setBackground(_LOW_CONFIDENCE_COLOR)
+        very_low_format = QTextCharFormat()
+        very_low_format.setBackground(_VERY_LOW_CONFIDENCE_COLOR)
+        for segment in segments:
+            if segment.confidence is None or segment.confidence >= _LOW_CONFIDENCE_THRESHOLD:
+                char_format = plain_format
+            elif segment.confidence >= _VERY_LOW_CONFIDENCE_THRESHOLD:
+                char_format = low_format
+            else:
+                char_format = very_low_format
+            cursor.insertText(segment.text, char_format)
+
     def _refresh_detail_panel(self, page: Page) -> None:
         pixmap = QPixmap(str(page.image_path))
         if not pixmap.isNull():
@@ -249,7 +304,19 @@ class MainWindow(QMainWindow):
 
         self._suppress_text_changed = True
         if page.ocr_status == OcrStatus.DONE and page.ocr_result is not None:
-            self._text_edit.setPlainText(page.ocr_result.edited_text or page.ocr_result.raw_text)
+            if page.ocr_result.edited_text is not None:
+                # Once the user has edited the text, segments/raw_text no
+                # longer correspond to what's on screen — show their text
+                # plainly rather than highlighting stale confidence data.
+                self._text_edit.setPlainText(page.ocr_result.edited_text)
+            elif page.ocr_result.segments:
+                self._render_segments(page.ocr_result.segments)
+            else:
+                # segments is only populated by OcrEngine.run() — a
+                # caller that builds OcrResult directly (tests, or any
+                # future non-OCR text source) still gets its raw_text
+                # shown, just without confidence highlighting.
+                self._text_edit.setPlainText(page.ocr_result.raw_text)
             self._text_edit.setReadOnly(False)
         elif page.ocr_status == OcrStatus.FAILED:
             self._text_edit.setPlainText("")

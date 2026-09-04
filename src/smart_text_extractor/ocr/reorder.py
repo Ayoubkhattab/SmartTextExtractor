@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from smart_text_extractor.core.models import BoundingBox, Rect
+from smart_text_extractor.core.models import BoundingBox, Rect, TextSegment
 
 _ARABIC_RANGE = range(0x0600, 0x0700)
 
@@ -223,14 +223,16 @@ def _split_line_into_column_runs(line: Line, gap_multiplier: float = 3.0) -> lis
     return [run for run in runs if run]
 
 
-def _line_text_with_cell_separators(
+def _line_segments_with_cell_separators(
     line: Line, gap_multiplier: float = 4.0, min_gap_threshold: float = 40.0, separator: str = " | "
-) -> str:
-    """Renders one already-ordered row as text, inserting `separator` at
-    table-cell boundaries instead of a plain space — addresses a real,
-    evidence-confirmed complaint (user report + docs/phases/phase-2-ocr-pipeline.md):
-    table rows were unreadable because every cell got mashed together with
-    a single space, indistinguishable from the words within a cell.
+) -> list[TextSegment]:
+    """Renders one already-ordered row as TextSegments, inserting
+    `separator` (confidence None — it's punctuation, not a recognized
+    word) at table-cell boundaries instead of a plain space — addresses a
+    real, evidence-confirmed complaint (user report +
+    docs/phases/phase-2-ocr-pipeline.md): table rows were unreadable
+    because every cell got mashed together with a single space,
+    indistinguishable from the words within a cell.
 
     Evidence (real table, page 3 of هيكلية القسم والمكاتب.pdf, Tesseract
     TSV for one row — "تخطيط الدورة | بداية كل دورة ٠ ساعتان | المكاتب
@@ -254,7 +256,7 @@ def _line_text_with_cell_separators(
     """
     words = line.words
     if len(words) <= 1:
-        return line.text
+        return [TextSegment(w.text, w.confidence) for w in words]
 
     gaps = [
         max(a.rect.x, b.rect.x) - min(a.rect.x + a.rect.width, b.rect.x + b.rect.width)
@@ -262,11 +264,18 @@ def _line_text_with_cell_separators(
     ]
     gap_threshold = max(min(gaps) * gap_multiplier, min_gap_threshold)
 
-    parts = [words[0].text]
+    segments = [TextSegment(words[0].text, words[0].confidence)]
     for word, gap in zip(words[1:], gaps):
-        parts.append(separator if gap > gap_threshold else " ")
-        parts.append(word.text)
-    return "".join(parts)
+        segments.append(TextSegment(separator if gap > gap_threshold else " ", None))
+        segments.append(TextSegment(word.text, word.confidence))
+    return segments
+
+
+def _line_text_with_cell_separators(
+    line: Line, gap_multiplier: float = 4.0, min_gap_threshold: float = 40.0, separator: str = " | "
+) -> str:
+    segments = _line_segments_with_cell_separators(line, gap_multiplier, min_gap_threshold, separator)
+    return "".join(segment.text for segment in segments)
 
 
 def _cluster_columns_and_order(lines: list[Line], column_gap_ratio: float, rtl_page: bool) -> list[Line]:
@@ -349,7 +358,7 @@ def order_lines_reading_order(lines: list[Line], column_gap_ratio: float = 0.08)
     return ordered
 
 
-def assemble_text(lines: list[Line]) -> str:
+def assemble_text_segments(lines: list[Line]) -> list[TextSegment]:
     """Joins lines within the same Tesseract block with a single newline,
     and separates blocks (paragraphs, table regions, diagram boxes...)
     with a blank line — addresses a real complaint that extracted text
@@ -357,16 +366,33 @@ def assemble_text(lines: list[Line]) -> str:
     Relies on order_lines_reading_order's block_order pass already having
     made same-block lines contiguous, so a block_num change is a reliable
     paragraph boundary without needing to re-group here.
+
+    Returns TextSegments (word segments carry confidence; the newlines/
+    blank-lines/space/" | " separators inserted here and by
+    _line_segments_with_cell_separators all carry confidence None) rather
+    than a plain string — concatenating every segment's text reproduces
+    exactly what assemble_text returns, but callers that need per-word
+    confidence (e.g. highlighting uncertain words in the UI) can use the
+    structure instead of re-deriving it from raw_text.
     """
     if not lines:
-        return ""
+        return []
 
-    paragraphs: list[list[str]] = [[]]
+    segments: list[TextSegment] = []
     current_block = lines[0].block_num
+    first_in_block = True
     for line in lines:
         if line.block_num != current_block:
-            paragraphs.append([])
+            segments.append(TextSegment("\n\n", None))
             current_block = line.block_num
-        paragraphs[-1].append(_line_text_with_cell_separators(line))
+            first_in_block = True
+        elif not first_in_block:
+            segments.append(TextSegment("\n", None))
+        segments.extend(_line_segments_with_cell_separators(line))
+        first_in_block = False
 
-    return "\n\n".join("\n".join(paragraph) for paragraph in paragraphs)
+    return segments
+
+
+def assemble_text(lines: list[Line]) -> str:
+    return "".join(segment.text for segment in assemble_text_segments(lines))

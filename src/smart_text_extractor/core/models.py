@@ -53,11 +53,30 @@ class BoundingBox:
     confidence: float
 
 
+@dataclass(frozen=True)
+class TextSegment:
+    """One piece of assembled OCR output text (§7.1.1): either a
+    recognized word (confidence set) or a structural separator — a plain
+    space, a table-cell " | ", a line break, or a blank-line paragraph
+    break (confidence None, since a separator was never "recognized").
+
+    Concatenating every segment's `text` in order reproduces
+    OcrResult.raw_text exactly — this is what lets the UI render the
+    same text with per-word confidence highlighting instead of needing a
+    second, separately-formatted representation that could drift out of
+    sync with raw_text.
+    """
+
+    text: str
+    confidence: float | None
+
+
 @dataclass
 class OcrResult:
     raw_text: str = ""
     edited_text: str | None = None  # None until the user edits (US-06); re-OCR never touches this
     word_boxes: list[BoundingBox] = field(default_factory=list)
+    segments: list[TextSegment] = field(default_factory=list)
     confidence_score: float = 0.0
 
 

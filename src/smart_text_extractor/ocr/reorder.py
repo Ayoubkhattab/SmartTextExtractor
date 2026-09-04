@@ -54,12 +54,29 @@ class Line:
         return " ".join(w.text for w in self.words)
 
 
+_BIDI_CONTROL_CHARS = ("‎", "‏")  # LRM, RLM
+
+
 def words_from_tsv(data: dict) -> list[tuple[BoundingBox, int, int, int]]:
     """Extract (word, block_num, par_num, line_num) from pytesseract's
     image_to_data(..., output_type=Output.DICT) result, dropping empty /
-    non-text rows (conf == -1 marks block/par/line-level summary rows)."""
+    non-text rows (conf == -1 marks block/par/line-level summary rows).
+
+    Also strips stray bidi control marks (LRM U+200E, RLM U+200F) that
+    Tesseract's own bidi reordering leaves embedded in word text — real
+    examples seen on every mixed-script page tested this session:
+    'Jods‏', '٠‏', 'Smart‎'. These are zero-width, carry no
+    visible glyph or semantic content, and their only effect is cluttering
+    raw_text and confusing char-based analysis (e.g. a lone stray mark
+    could otherwise slip through as a 1-character "word"). Stripped here,
+    at the single point every word enters the pipeline, rather than only
+    at final text assembly, so every downstream step (majority-Arabic
+    detection, Latin detection, gap measurement) sees the clean text too.
+    """
     results: list[tuple[BoundingBox, int, int, int]] = []
     for i, text in enumerate(data["text"]):
+        for mark in _BIDI_CONTROL_CHARS:
+            text = text.replace(mark, "")
         if not text.strip():
             continue
         conf = float(data["conf"][i])

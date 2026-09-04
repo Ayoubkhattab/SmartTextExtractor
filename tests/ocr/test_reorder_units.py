@@ -48,6 +48,23 @@ def test_words_from_tsv_drops_empty_and_negative_confidence_rows() -> None:
     assert (block_num, par_num, line_num) == (1, 0, 1)
 
 
+def test_words_from_tsv_strips_stray_bidi_control_marks() -> None:
+    """Regression test: real Tesseract output on every mixed-script page
+    tested this session embedded LRM/RLM marks directly in word text
+    ('Jods‏', '٠‏', 'Smart‎') — zero-width bidi
+    artifacts with no visible glyph, cluttering raw_text."""
+    data = _fake_tsv(
+        [
+            ("Jods‏", 66.0, 0, 0, 40, 10, 1, 1),
+            ("٠‏", 91.0, 50, 0, 5, 10, 1, 1),  # Arabic-Indic zero, digit + RLM
+            ("‏", 80.0, 60, 0, 2, 10, 1, 1),  # a lone stray mark, nothing else — must be dropped entirely
+        ]
+    )
+    result = words_from_tsv(data)
+    texts = [box.text for box, *_ in result]
+    assert texts == ["Jods", "٠"]
+
+
 def test_group_into_lines_preserves_first_seen_order() -> None:
     box_a = (BoundingBox("a", Rect(0, 0, 10, 10), 90.0), 1, 0, 1)
     box_b = (BoundingBox("b", Rect(20, 0, 10, 10), 90.0), 1, 0, 1)

@@ -13,7 +13,7 @@ import pytesseract
 from PIL import Image
 
 from smart_text_extractor.core.models import OcrResult
-from smart_text_extractor.ocr.preprocessing import preprocess
+from smart_text_extractor.ocr.preprocessing import enhance_contrast, preprocess_color
 from smart_text_extractor.ocr.reorder import (
     assemble_markdown,
     assemble_text_segments,
@@ -26,9 +26,10 @@ from smart_text_extractor.ocr.reorder import (
 )
 
 
-def _as_bgr_array(image: np.ndarray | Image.Image | Path | str) -> np.ndarray:
+def as_bgr_array(image: np.ndarray | Image.Image | Path | str) -> np.ndarray:
     """Normalizes any of OcrEngine.run()'s accepted input types into the
-    BGR numpy array preprocessing.py works on."""
+    BGR numpy array preprocessing.py works on. Public: ocr/hybrid_engine.py
+    also needs it, to prepare the same input for preprocess_color()."""
     if isinstance(image, np.ndarray):
         return image
     if isinstance(image, Image.Image):
@@ -52,6 +53,21 @@ class OcrEngine:
             os.environ["TESSDATA_PREFIX"] = str(tessdata_dir)
 
     def run(self, image: np.ndarray | Image.Image | Path | str, psm: int = 3) -> OcrResult:
+        # §7.1 step 2 — this was previously skipped entirely: run() sent
+        # the raw image straight to Tesseract, so deskew/contrast/denoise
+        # existed as tested code that nothing ever actually called.
+        color_preprocessed = preprocess_color(as_bgr_array(image))
+        return self.run_on_color_preprocessed(color_preprocessed, psm=psm)
+
+    def run_on_color_preprocessed(self, color_preprocessed: np.ndarray, psm: int = 3) -> OcrResult:
+        """The recognition half of run(), taking preprocessing.preprocess_color's
+        output directly rather than a raw image — split out so the hybrid
+        OCR engine (ocr/hybrid_engine.py) can run this exact Tesseract pass
+        once and reuse the same color-preprocessed array afterwards to crop
+        Qari-OCR's input regions, instead of preprocessing the page twice
+        (once here, once more for the crops) or cropping from run()'s
+        grayscale/CLAHE output, which is tuned for Tesseract specifically.
+        """
         # psm=3 (fully automatic page segmentation), not 6 (single uniform
         # block): confirmed against a real multi-section document (title,
         # subtitle, headings, highlighted box, bulleted body text at
@@ -61,10 +77,7 @@ class OcrEngine:
         # not undo the §7.1.1 multi-column fix: _split_line_into_column_runs
         # operates on Tesseract's line output regardless of which
         # auto-segmentation psm produced it.
-        # §7.1 step 2 — this was previously skipped entirely: run() sent
-        # the raw image straight to Tesseract, so deskew/contrast/denoise
-        # existed as tested code that nothing ever actually called.
-        preprocessed = preprocess(_as_bgr_array(image))
+        preprocessed = enhance_contrast(color_preprocessed)
         data = pytesseract.image_to_data(
             preprocessed, lang=self.lang, config=f"--psm {psm}", output_type=pytesseract.Output.DICT
         )

@@ -2,7 +2,7 @@
 test_engine.py/test_reorder.py which exercise the real binary."""
 from __future__ import annotations
 
-from smart_text_extractor.core.models import BoundingBox, Rect, TextSegment
+from smart_text_extractor.core.models import BoundingBox, DocumentUnit, Rect, TextSegment
 from smart_text_extractor.ocr.reorder import (
     Line,
     _block_is_tabular,
@@ -16,7 +16,10 @@ from smart_text_extractor.ocr.reorder import (
     assemble_markdown,
     assemble_text,
     assemble_text_segments,
+    classify_document_units,
     correct_known_arabic_misreads,
+    document_units_to_markdown,
+    document_units_to_segments,
     group_into_lines,
     merge_dual_language_passes,
     order_lines_reading_order,
@@ -571,3 +574,110 @@ class TestAssembleMarkdown:
 
     def test_assemble_markdown_on_empty_lines_returns_empty_string(self) -> None:
         assert assemble_markdown([]) == ""
+
+
+class TestDocumentUnitBbox:
+    """DocumentUnit.bbox was added for the hybrid OCR engine
+    (ocr/hybrid_engine.py): it needs to know exactly which pixel region on
+    the page each unit came from, to crop that same region for a second
+    Qari-OCR pass. It must be the union of exactly the words that unit's
+    own text came from — not the whole Tesseract block a unit was carved
+    out of, since one block can split into several units (e.g. a heading
+    line followed by a paragraph in the same block)."""
+
+    def test_heading_unit_bbox_is_its_own_line_rect(self) -> None:
+        # 3 body-height (20px) lines set a clear median of 20, so the
+        # 40px heading line (ratio 2.0) is unambiguously flagged — see
+        # _HEADING_HEIGHT_RATIO.
+        body_lines = [_one_word_line(f"نص{i}", 20, block_num=1) for i in range(3)]
+        heading_line = Line(
+            words=[BoundingBox("عنوان", Rect(50, 200, 150, 40), 90.0)], block_num=2, par_num=0, line_num=1
+        )
+
+        units = classify_document_units([*body_lines, heading_line])
+
+        heading_unit = next(u for u in units if u.kind == "heading")
+        assert heading_unit.bbox == Rect(50, 200, 150, 40)
+
+    def test_paragraph_unit_bbox_is_the_union_of_its_own_lines_only(self) -> None:
+        """A block that splits into [paragraph, heading, paragraph] must
+        give each piece its own bbox — not the whole block's span,
+        which would wrongly include the heading's region too."""
+        para_line_1 = Line(words=[BoundingBox("a", Rect(0, 0, 100, 20), 90.0)], block_num=1, par_num=0, line_num=1)
+        para_line_2 = Line(words=[BoundingBox("b", Rect(0, 30, 100, 20), 90.0)], block_num=1, par_num=0, line_num=2)
+        heading_line = Line(words=[BoundingBox("c", Rect(0, 60, 100, 40), 90.0)], block_num=1, par_num=0, line_num=3)
+        para_line_3 = Line(words=[BoundingBox("d", Rect(0, 110, 100, 20), 90.0)], block_num=1, par_num=0, line_num=4)
+
+        units = classify_document_units([para_line_1, para_line_2, heading_line, para_line_3])
+
+        assert [u.kind for u in units] == ["paragraph", "heading", "paragraph"]
+        assert units[0].bbox == Rect(0, 0, 100, 50)  # union of para_line_1 + para_line_2 only
+        assert units[1].bbox == Rect(0, 60, 100, 40)  # the heading line alone
+        assert units[2].bbox == Rect(0, 110, 100, 20)  # para_line_3 alone
+
+    def test_table_unit_bbox_is_the_union_of_all_its_rows(self) -> None:
+        def two_cell_row(y: int, line_num: int) -> Line:
+            return Line(
+                words=[
+                    BoundingBox("R", Rect(500, y, 60, 20), 90.0),
+                    BoundingBox("M", Rect(90, y, 60, 20), 90.0),
+                    BoundingBox("L", Rect(0, y, 60, 20), 90.0),
+                ],
+                block_num=1,
+                par_num=0,
+                line_num=line_num,
+            )
+        row1 = two_cell_row(y=0, line_num=1)
+        row2 = two_cell_row(y=30, line_num=2)
+
+        units = classify_document_units([row1, row2])
+
+        table_unit = next(u for u in units if u.kind == "table")
+        assert table_unit.bbox == Rect(0, 0, 560, 50)
+
+    def test_empty_lines_returns_no_units(self) -> None:
+        assert classify_document_units([]) == []
+
+
+class TestDocumentUnitsToMarkdownAndSegments:
+    """document_units_to_markdown/document_units_to_segments let the hybrid
+    OCR engine (ocr/hybrid_engine.py) re-derive OcrResult.markdown/raw_text/
+    segments from a unit list it has rewritten with Qari-OCR's output —
+    they must render identically to assemble_markdown/assemble_text_segments
+    when fed classify_document_units' own output unchanged, since that's
+    exactly what assemble_markdown itself now does internally."""
+
+    def test_document_units_to_markdown_matches_assemble_markdown(self) -> None:
+        paragraph_line = _one_word_line("فقرة", 20, block_num=1)
+
+        units = classify_document_units([paragraph_line])
+
+        assert document_units_to_markdown(units) == assemble_markdown([paragraph_line]) == "فقرة"
+
+    def test_document_units_to_segments_matches_assemble_text_segments_for_non_table_units(self) -> None:
+        lines = [
+            Line(words=[BoundingBox("a", Rect(0, 0, 10, 10), 90.0)], block_num=1, par_num=0, line_num=1),
+            Line(words=[BoundingBox("b", Rect(0, 50, 10, 10), 90.0)], block_num=2, par_num=0, line_num=1),
+        ]
+
+        units = classify_document_units(lines)
+        segments = document_units_to_segments(units)
+
+        assert segments == assemble_text_segments(lines) == [
+            TextSegment("a", 90.0),
+            TextSegment("\n\n", None),
+            TextSegment("b", 90.0),
+        ]
+
+    def test_document_units_to_segments_renders_table_rows_with_pipes_and_newlines(self) -> None:
+        cell_a = [TextSegment("A", 90.0)]
+        cell_b = [TextSegment("B", 90.0)]
+        cell_c = [TextSegment("C", 90.0)]
+        table_unit = DocumentUnit(kind="table", rows=[[cell_a, cell_b], [cell_c]])
+
+        segments = document_units_to_segments([table_unit])
+
+        assert "".join(s.text for s in segments) == "A | B\nC"
+
+    def test_document_units_to_segments_on_empty_units_returns_empty_list(self) -> None:
+        assert document_units_to_segments([]) == []

@@ -4,7 +4,14 @@ import cv2
 import numpy as np
 import pytest
 
-from smart_text_extractor.ocr.preprocessing import deskew, denoise, enhance_contrast, preprocess, upscale_if_small
+from smart_text_extractor.ocr.preprocessing import (
+    deskew,
+    denoise,
+    enhance_contrast,
+    preprocess,
+    preprocess_color,
+    upscale_if_small,
+)
 from tests.ocr.conftest import make_text_image, requires_arabic_font, requires_tesseract
 
 
@@ -109,6 +116,22 @@ def test_full_pipeline_runs_end_to_end_without_error() -> None:
     tilted_color = cv2.cvtColor(_synthetic_text_lines_image(angle_degrees=5.0), cv2.COLOR_GRAY2BGR)
     result = preprocess(tilted_color)
     assert result.shape == (1200, 1800)
+
+
+def test_preprocess_color_stays_color_unlike_preprocess() -> None:
+    """ocr/hybrid_engine.py crops Qari-OCR's input from preprocess_color's
+    output specifically because it must still be color (see that
+    function's docstring) — preprocess() itself converts to grayscale via
+    enhance_contrast, which is fine for Tesseract but would feed Qari an
+    image unlike anything it was evaluated against this session."""
+    tilted_color = cv2.cvtColor(_synthetic_text_lines_image(angle_degrees=5.0), cv2.COLOR_GRAY2BGR)
+
+    color_result = preprocess_color(tilted_color)
+    grayscale_result = preprocess(tilted_color)
+
+    assert color_result.ndim == 3 and color_result.shape[2] == 3
+    assert grayscale_result.ndim == 2
+    assert color_result.shape[:2] == grayscale_result.shape  # same geometry — only enhance_contrast's grayscale step differs
 
 
 def test_upscale_if_small_scales_up_a_low_resolution_image() -> None:

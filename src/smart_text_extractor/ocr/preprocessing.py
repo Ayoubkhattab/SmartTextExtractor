@@ -101,6 +101,23 @@ def deskew(image: np.ndarray) -> np.ndarray:
     )
 
 
+def preprocess_color(image: np.ndarray) -> np.ndarray:
+    """Upscale -> deskew -> denoise, stopping short of the final grayscale
+    +CLAHE step (see enhance_contrast) — the geometry-complete, still-color
+    intermediate. Upscale and deskew are the only steps in the pipeline
+    that change pixel positions relative to the source image, so this is
+    exactly the coordinate space DocumentUnit.bbox/BoundingBox.rect
+    describe. Exposed as its own step for the hybrid OCR engine
+    (ocr/hybrid_engine.py): it crops Qari-OCR's input regions from here
+    rather than from enhance_contrast's output, since Qari was evaluated
+    throughout this session against full-color page renders, not
+    Tesseract-tuned grayscale/CLAHE images — feeding it the latter is an
+    unverified, unnecessary variable this pipeline doesn't need to
+    introduce.
+    """
+    return denoise(deskew(upscale_if_small(image)))
+
+
 def preprocess(image: np.ndarray) -> np.ndarray:
     """The full §7.1 pipeline: upscale (if small) -> deskew -> denoise -> contrast.
 
@@ -121,4 +138,4 @@ def preprocess(image: np.ndarray) -> np.ndarray:
     first, on the least-processed edges available, fixed it: the same
     image went from garbled/fragmented OCR output to an exact match.
     """
-    return enhance_contrast(denoise(deskew(upscale_if_small(image))))
+    return enhance_contrast(preprocess_color(image))

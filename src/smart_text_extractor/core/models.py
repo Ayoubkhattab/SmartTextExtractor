@@ -96,6 +96,7 @@ class DocumentUnit:
     kind: str  # "heading" | "table" | "paragraph"
     segments: list[TextSegment] = field(default_factory=list)  # heading/paragraph content; unused for kind == "table"
     rows: list[list[list[TextSegment]]] = field(default_factory=list)  # table cell rows (each cell its own segment list); unused outside kind == "table"
+    bbox: Rect | None = None  # union of this unit's source words' positions on the page image (pixels, same space as OcrResult.word_boxes) — lets the hybrid OCR engine (ocr/hybrid_engine.py) crop exactly this region for a second pass; None only for a unit built without positional data (e.g. constructed directly by a test)
 
 
 @dataclass

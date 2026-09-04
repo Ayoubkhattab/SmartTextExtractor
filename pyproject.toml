@@ -20,6 +20,17 @@ windows = ["pywin32>=306"]
 # the text themselves. Real scanned pages never need this — their glyphs
 # are already correctly shaped ink on paper.
 dev = ["pytest>=8.0", "pytest-qt>=4.4", "arabic-reshaper>=3.0", "python-bidi>=0.4"]
+# Qari-OCR (ocr/qari_engine.py), the hybrid pipeline's prose/heading
+# engine — deliberately NOT a base dependency: several GB of downloads and
+# a CUDA GPU (8GB+ VRAM) it doesn't degrade gracefully without at install
+# time, only at runtime (ocr/hybrid_engine.py falls back to Tesseract-only
+# when this group isn't installed or no GPU is present). "torch" here
+# resolves to whatever build PyPI serves by default (often CPU-only or the
+# wrong CUDA version) — install a matching CUDA build from
+# https://pytorch.org/get-started/locally/ (e.g. `--index-url
+# https://download.pytorch.org/whl/cu128`) *before* this group, or `pip
+# install '.[vlm]'` alone will leave torch.cuda.is_available() False.
+vlm = ["torch>=2.4", "transformers>=4.45", "accelerate>=0.34", "qwen-vl-utils>=0.0.8"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

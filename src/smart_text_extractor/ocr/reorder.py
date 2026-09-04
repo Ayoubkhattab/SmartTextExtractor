@@ -34,6 +34,14 @@ from smart_text_extractor.core.models import BoundingBox, DocumentUnit, Rect, Te
 _ARABIC_RANGE = range(0x0600, 0x0700)
 
 
+def _union_rect(rects: list[Rect]) -> Rect:
+    x0 = min(r.x for r in rects)
+    y0 = min(r.y for r in rects)
+    x1 = max(r.x + r.width for r in rects)
+    y1 = max(r.y + r.height for r in rects)
+    return Rect(x=x0, y=y0, width=x1 - x0, height=y1 - y0)
+
+
 @dataclass
 class Line:
     words: list[BoundingBox]
@@ -43,11 +51,7 @@ class Line:
 
     @property
     def rect(self) -> Rect:
-        x0 = min(w.rect.x for w in self.words)
-        y0 = min(w.rect.y for w in self.words)
-        x1 = max(w.rect.x + w.rect.width for w in self.words)
-        y1 = max(w.rect.y + w.rect.height for w in self.words)
-        return Rect(x=x0, y=y0, width=x1 - x0, height=y1 - y0)
+        return _union_rect([w.rect for w in self.words])
 
     @property
     def text(self) -> str:
@@ -542,18 +546,25 @@ def _classify_plain_block(block_lines: list[Line], page_median_height: float) ->
     """
     units: list[DocumentUnit] = []
     paragraph_segments: list[TextSegment] = []
+    paragraph_lines: list[Line] = []
     for line in block_lines:
         if _line_median_height(line) > page_median_height * _HEADING_HEIGHT_RATIO:
             if paragraph_segments:
-                units.append(DocumentUnit(kind="paragraph", segments=paragraph_segments))
+                units.append(
+                    DocumentUnit(kind="paragraph", segments=paragraph_segments, bbox=_union_rect([l.rect for l in paragraph_lines]))
+                )
                 paragraph_segments = []
-            units.append(DocumentUnit(kind="heading", segments=_line_segments_with_cell_separators(line)))
+                paragraph_lines = []
+            units.append(DocumentUnit(kind="heading", segments=_line_segments_with_cell_separators(line), bbox=line.rect))
         else:
             if paragraph_segments:
                 paragraph_segments.append(TextSegment("\n", None))
             paragraph_segments.extend(_line_segments_with_cell_separators(line))
+            paragraph_lines.append(line)
     if paragraph_segments:
-        units.append(DocumentUnit(kind="paragraph", segments=paragraph_segments))
+        units.append(
+            DocumentUnit(kind="paragraph", segments=paragraph_segments, bbox=_union_rect([l.rect for l in paragraph_lines]))
+        )
     return units
 
 
@@ -600,12 +611,14 @@ def classify_document_units(lines: list[Line]) -> list[DocumentUnit]:
             # letting the table below fall back to using its own first
             # data row as a stand-in header.
             rows = [header_row_cells] + [_line_cell_segments(line) for line in blocks[i + 1]]
-            units.append(DocumentUnit(kind="table", rows=rows))
+            bbox = _union_rect([block_lines[0].rect] + [line.rect for line in blocks[i + 1]])
+            units.append(DocumentUnit(kind="table", rows=rows, bbox=bbox))
             i += 2
             continue
 
         if _block_is_tabular(block_lines):
-            units.append(DocumentUnit(kind="table", rows=[_line_cell_segments(line) for line in block_lines]))
+            bbox = _union_rect([line.rect for line in block_lines])
+            units.append(DocumentUnit(kind="table", rows=[_line_cell_segments(line) for line in block_lines], bbox=bbox))
         else:
             units.extend(_classify_plain_block(block_lines, page_median_height))
         i += 1
@@ -613,9 +626,9 @@ def classify_document_units(lines: list[Line]) -> list[DocumentUnit]:
     return units
 
 
-def assemble_markdown(lines: list[Line]) -> str:
+def document_units_to_markdown(units: list[DocumentUnit]) -> str:
     rendered_units: list[str] = []
-    for unit in classify_document_units(lines):
+    for unit in units:
         if unit.kind == "heading":
             rendered_units.append(f"## {''.join(segment.text for segment in unit.segments)}")
         elif unit.kind == "table":
@@ -623,3 +636,36 @@ def assemble_markdown(lines: list[Line]) -> str:
         else:
             rendered_units.append("".join(segment.text for segment in unit.segments))
     return "\n\n".join(rendered_units)
+
+
+def assemble_markdown(lines: list[Line]) -> str:
+    return document_units_to_markdown(classify_document_units(lines))
+
+
+def document_units_to_segments(units: list[DocumentUnit]) -> list[TextSegment]:
+    """The inverse of classify_document_units's grouping: flattens a unit
+    list back into the same blank-line/" | "-separated flat shape
+    assemble_text_segments produces directly from Tesseract lines.
+
+    Needed because the hybrid OCR engine (ocr/hybrid_engine.py) replaces
+    some units' segments with a second engine's output *after*
+    classify_document_units already ran — so OcrResult.raw_text/segments
+    have to be re-derived from the final (possibly rewritten) units rather
+    than the original pre-rewrite lines, or they would silently disagree
+    with what document_units (and therefore the UI and Word export) show.
+    """
+    segments: list[TextSegment] = []
+    for index, unit in enumerate(units):
+        if index > 0:
+            segments.append(TextSegment("\n\n", None))
+        if unit.kind == "table":
+            for row_index, row in enumerate(unit.rows):
+                if row_index > 0:
+                    segments.append(TextSegment("\n", None))
+                for cell_index, cell in enumerate(row):
+                    if cell_index > 0:
+                        segments.append(TextSegment(" | ", None))
+                    segments.extend(cell)
+        else:
+            segments.extend(unit.segments)
+    return segments

@@ -40,8 +40,20 @@ from PyQt6.QtWidgets import (
 )
 
 from smart_text_extractor.concurrency.ocr_worker_pool import OcrWorkerPool
-from smart_text_extractor.core.models import Document, DocumentUnit, OcrResult, OcrStatus, Page, TextSegment
-from smart_text_extractor.core.pdf_import import render_pdf_to_images
+from smart_text_extractor.core.models import (
+    Document,
+    DocumentUnit,
+    OcrResult,
+    OcrStatus,
+    Page,
+    PdfPageSource,
+    TextSegment,
+)
+from smart_text_extractor.core.pdf_import import (
+    DEFAULT_RENDER_DPI,
+    is_text_layer_trustworthy,
+    render_pdf_to_images,
+)
 from smart_text_extractor.export.docx_export import PageContent, export_docx
 from smart_text_extractor.scanner.service import ScannerService
 
@@ -234,8 +246,22 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # noqa: BLE001 - surfaced to the user, not a crash
                 QMessageBox.warning(self, "تعذّرت قراءة الملف", f"تعذّر فتح {path.name}:\n{exc}")
                 return
-            for image_path in image_paths:
-                self._add_page(image_path)
+            # Judged once for the whole document, before any page is
+            # queued — see native_pdf_text.MAX_CORRUPT_TOKEN_RATIO.
+            text_layer_trusted = is_text_layer_trustworthy(path)
+            for page_index, image_path in enumerate(image_paths):
+                # Recording where the page came from is what lets the OCR
+                # pipeline also read this PDF's own embedded text for it
+                # (ocr/page_pipeline.py) instead of relying on OCR alone.
+                self._add_page(
+                    image_path,
+                    pdf_source=PdfPageSource(
+                        pdf_path=path,
+                        page_index=page_index,
+                        render_dpi=DEFAULT_RENDER_DPI,
+                        text_layer_trusted=text_layer_trusted,
+                    ),
+                )
         else:
             self._add_page(path)
 
@@ -325,8 +351,11 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(f"تم تصدير {len(exportable_pages)} صفحة إلى {path.name}")
 
-    def _add_page(self, image_path: Path, native_result: OcrResult | None = None) -> None:
+    def _add_page(
+        self, image_path: Path, native_result: OcrResult | None = None, pdf_source: PdfPageSource | None = None
+    ) -> None:
         page = self._document.add_page(image_path)
+        page.pdf_source = pdf_source
         item = QListWidgetItem(self._thumbnail_icon(image_path), f"{image_path.name}\nقيد المعالجة")
         self._page_list.addItem(item)
         index = self._page_list.count() - 1

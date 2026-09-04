@@ -12,8 +12,12 @@ from pathlib import Path
 
 import pymupdf
 
-from smart_text_extractor.core.models import OcrResult
-from smart_text_extractor.ocr.native_pdf_text import extract_native_text_result
+from smart_text_extractor.core.models import BoundingBox, OcrResult, Rect
+from smart_text_extractor.ocr.native_pdf_text import (
+    MAX_CORRUPT_TOKEN_RATIO,
+    corrupt_token_ratio,
+    extract_native_text_result,
+)
 
 DEFAULT_RENDER_DPI = 300  # matches the scan-resolution convention (§7.3)
 
@@ -21,6 +25,32 @@ DEFAULT_RENDER_DPI = 300  # matches the scan-resolution convention (§7.3)
 def _render_page_to_png(page: pymupdf.Page, out_path: Path, matrix: pymupdf.Matrix) -> None:
     pixmap = page.get_pixmap(matrix=matrix)
     pixmap.save(str(out_path))
+
+
+def is_text_layer_trustworthy(pdf_path: Path) -> bool:
+    """Whether this PDF's embedded text can be used instead of OCR'ing its
+    rendered pages — see native_pdf_text.MAX_CORRUPT_TOKEN_RATIO for what
+    is measured and why the decision is per document rather than per page.
+
+    Cheap: reads the text layer only (no rendering, no OCR), so it costs a
+    small fraction of the OCR pass it can save.
+    """
+    pdf_path = Path(pdf_path)
+    all_tokens: list[BoundingBox] = []
+    try:
+        with pymupdf.open(str(pdf_path)) as document:
+            for page_index in range(len(document)):
+                page = document.load_page(page_index)
+                all_tokens.extend(
+                    BoundingBox(text=word[4], rect=Rect(0, 0, 1, 1), confidence=100.0)
+                    for word in page.get_text("words")
+                )
+    except Exception:  # noqa: BLE001 - unreadable text layer is simply not a trustworthy one
+        return False
+
+    if not all_tokens:
+        return False
+    return corrupt_token_ratio(all_tokens) <= MAX_CORRUPT_TOKEN_RATIO
 
 
 def render_pdf_to_images(pdf_path: Path, output_dir: Path, dpi: int = DEFAULT_RENDER_DPI) -> list[Path]:

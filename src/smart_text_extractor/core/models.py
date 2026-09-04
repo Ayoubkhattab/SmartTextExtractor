@@ -110,6 +110,29 @@ class OcrResult:
     confidence_score: float = 0.0
 
 
+@dataclass(frozen=True)
+class PdfPageSource:
+    """Where a page came from, when it came from a PDF rather than a scan
+    or an image file — enough to re-open the source and read that page's
+    own embedded text layer (ocr/native_pdf_text.py).
+
+    render_dpi is the DPI image_path was rendered at, and must be carried
+    rather than re-derived: PDF text coordinates are in points, and only
+    this number puts them in the same pixel space as the rendered image
+    (and therefore as the OCR word boxes they get compared against).
+    """
+
+    pdf_path: Path
+    page_index: int
+    render_dpi: int
+    text_layer_trusted: bool = True
+    """Decided once per document when the PDF is opened
+    (core/pdf_import.is_text_layer_trustworthy), not per page: the damage
+    it screens for comes from the file's font/generator, so it is a
+    property of the whole document. False means this page is OCR'd exactly
+    as it was before native text extraction existed."""
+
+
 @dataclass
 class Page:
     """One page within a Document. order_index in the list = display/export order (US-07)."""
@@ -118,6 +141,7 @@ class Page:
     order_index: int
     id: str = field(default_factory=lambda: uuid4().hex)
     dpi: int | None = None  # set at scan/import time (§7.3) — never assumed later
+    pdf_source: PdfPageSource | None = None  # None for scans/plain images: those have no text layer to read
     rotation: int = 0
     crop_box: Rect | None = None
     ocr_status: OcrStatus = OcrStatus.PENDING

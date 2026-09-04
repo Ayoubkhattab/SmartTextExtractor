@@ -17,6 +17,7 @@ from typing import Callable
 
 from smart_text_extractor.core.models import OcrStatus, Page
 from smart_text_extractor.ocr.engine import OcrEngine
+from smart_text_extractor.ocr.page_pipeline import run_page
 
 OnPageDone = Callable[[Page, Exception | None], None]
 
@@ -34,7 +35,11 @@ class OcrWorkerPool:
 
     def submit(self, page: Page, on_done: OnPageDone) -> Future:
         page.ocr_status = OcrStatus.PROCESSING
-        future = self._executor.submit(self._engine.run, str(page.image_path))
+        # run_page, not engine.run directly: a page rendered from a PDF also
+        # has that PDF's own embedded text, which is combined with the OCR
+        # reading here (ocr/page_pipeline.py). Pages that aren't from a PDF
+        # go straight through to the engine exactly as before.
+        future = self._executor.submit(run_page, page, self._engine)
         future.add_done_callback(lambda f: self._handle_result(page, f, on_done))
         return future
 

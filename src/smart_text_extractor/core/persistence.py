@@ -16,6 +16,7 @@ from smart_text_extractor.core.models import (
     OcrResult,
     OcrStatus,
     Page,
+    PdfPageSource,
     Rect,
     SourceType,
 )
@@ -57,6 +58,28 @@ def _ocr_result_from_dict(data: dict | None) -> OcrResult | None:
     )
 
 
+def _pdf_source_to_dict(source: PdfPageSource | None) -> dict | None:
+    if source is None:
+        return None
+    return {
+        "pdf_path": str(source.pdf_path),
+        "page_index": source.page_index,
+        "render_dpi": source.render_dpi,
+        "text_layer_trusted": source.text_layer_trusted,
+    }
+
+
+def _pdf_source_from_dict(data: dict | None) -> PdfPageSource | None:
+    if data is None:
+        return None
+    return PdfPageSource(
+        pdf_path=Path(data["pdf_path"]),
+        page_index=data["page_index"],
+        render_dpi=data["render_dpi"],
+        text_layer_trusted=data.get("text_layer_trusted", True),
+    )
+
+
 def _page_to_dict(page: Page) -> dict:
     return {
         "id": page.id,
@@ -68,6 +91,7 @@ def _page_to_dict(page: Page) -> dict:
         "ocr_status": page.ocr_status.value,
         "ocr_result": _ocr_result_to_dict(page.ocr_result),
         "included_in_range": page.included_in_range,
+        "pdf_source": _pdf_source_to_dict(page.pdf_source),
     }
 
 
@@ -82,6 +106,9 @@ def _page_from_dict(data: dict) -> Page:
         ocr_status=OcrStatus(data["ocr_status"]),
         ocr_result=_ocr_result_from_dict(data["ocr_result"]),
         included_in_range=data["included_in_range"],
+        # .get, not [...]: a document saved before pdf_source existed must
+        # still load — it just re-OCRs without its text layer.
+        pdf_source=_pdf_source_from_dict(data.get("pdf_source")),
     )
 
 

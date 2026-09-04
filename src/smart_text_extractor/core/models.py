@@ -72,12 +72,32 @@ class TextSegment:
 
 
 @dataclass
+class DocumentUnit:
+    """One structural unit of a page's content, classified for structured
+    export (§7.1.1) — a heading, a table, or a paragraph. Produced once
+    (smart_text_extractor.ocr.reorder.classify_document_units) and shared
+    by every structured-export renderer (Markdown, Word/docx, ...) so the
+    table/heading classification logic lives in exactly one place instead
+    of being re-implemented — or re-parsed back out of a rendered string
+    — per export format. Lives here rather than in reorder.py because
+    OcrResult (below) needs to reference it without reorder.py's OCR-
+    pipeline internals (Line, block_num grouping) becoming part of the
+    domain model.
+    """
+
+    kind: str  # "heading" | "table" | "paragraph"
+    text: str = ""  # heading text, or a paragraph's lines joined by "\n"
+    rows: list[list[str]] = field(default_factory=list)  # table cell rows; unused outside kind == "table"
+
+
+@dataclass
 class OcrResult:
     raw_text: str = ""
     edited_text: str | None = None  # None until the user edits (US-06); re-OCR never touches this
     word_boxes: list[BoundingBox] = field(default_factory=list)
     segments: list[TextSegment] = field(default_factory=list)
     markdown: str = ""  # structured export (§7.1.1): real tables/headings, not just flat text
+    document_units: list[DocumentUnit] = field(default_factory=list)  # same structure, for non-Markdown exports (Word)
     confidence_score: float = 0.0
 
 

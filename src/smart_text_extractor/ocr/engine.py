@@ -17,6 +17,7 @@ from smart_text_extractor.ocr.preprocessing import preprocess
 from smart_text_extractor.ocr.reorder import (
     assemble_markdown,
     assemble_text_segments,
+    classify_document_units,
     group_into_lines,
     merge_dual_language_passes,
     order_lines_reading_order,
@@ -89,6 +90,7 @@ class OcrEngine:
         segments = assemble_text_segments(ordered_lines)
         raw_text = "".join(segment.text for segment in segments)
         markdown = assemble_markdown(ordered_lines)
+        document_units = classify_document_units(ordered_lines)
         word_boxes = [word for line in ordered_lines for word in line.words]
         confidences = [word.confidence for word in word_boxes]
         confidence_score = sum(confidences) / len(confidences) if confidences else 0.0
@@ -98,5 +100,6 @@ class OcrEngine:
             word_boxes=word_boxes,
             segments=segments,
             markdown=markdown,
+            document_units=document_units,
             confidence_score=confidence_score,
         )

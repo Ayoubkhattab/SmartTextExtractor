@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 from smart_text_extractor.concurrency.ocr_worker_pool import OcrWorkerPool
 from smart_text_extractor.core.models import Document, OcrStatus, Page, TextSegment
 from smart_text_extractor.core.pdf_import import render_pdf_to_images
+from smart_text_extractor.export.docx_export import PageContent, export_docx
 from smart_text_extractor.scanner.service import ScannerService
 
 _TEXT_COLOR = "#1a1d21"
@@ -138,9 +139,13 @@ class MainWindow(QMainWindow):
         scan_action.triggered.connect(self._on_scan)
         toolbar.addAction(scan_action)
 
-        export_action = QAction("تصدير كـ Markdown...", self)
-        export_action.triggered.connect(self._on_export_markdown)
-        toolbar.addAction(export_action)
+        export_word_action = QAction("تصدير كملف Word...", self)
+        export_word_action.triggered.connect(self._on_export_word)
+        toolbar.addAction(export_word_action)
+
+        export_markdown_action = QAction("تصدير كـ Markdown...", self)
+        export_markdown_action.triggered.connect(self._on_export_markdown)
+        toolbar.addAction(export_markdown_action)
 
     def _build_central_widget(self) -> None:
         self._page_list = QListWidget()
@@ -231,15 +236,18 @@ class MainWindow(QMainWindow):
             self, "أجهزة موجودة", f"تم العثور على {len(devices)} جهاز — دعم المسح الكامل قيد الإنجاز."
         )
 
-    def _on_export_markdown(self) -> None:
+    def _exportable_pages(self) -> list[Page]:
         # US-08's included_in_range already exists for exactly this: which
         # pages belong in an export. A page whose OCR isn't DONE (still
         # processing, failed, or never run) has no text worth exporting.
-        exportable_pages = [
+        return [
             page
             for page in self._document.pages
             if page.included_in_range and page.ocr_status == OcrStatus.DONE and page.ocr_result is not None
         ]
+
+    def _on_export_markdown(self) -> None:
+        exportable_pages = self._exportable_pages()
         if not exportable_pages:
             QMessageBox.information(self, "لا يوجد نص لتصديره", "لا توجد صفحات مكتملة المعالجة لتصديرها.")
             return
@@ -263,6 +271,37 @@ class MainWindow(QMainWindow):
 
         try:
             path.write_text("\n\n---\n\n".join(page_texts), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "تعذّر الحفظ", f"تعذّر حفظ الملف:\n{exc}")
+            return
+
+        self.statusBar().showMessage(f"تم تصدير {len(exportable_pages)} صفحة إلى {path.name}")
+
+    def _on_export_word(self) -> None:
+        exportable_pages = self._exportable_pages()
+        if not exportable_pages:
+            QMessageBox.information(self, "لا يوجد نص لتصديره", "لا توجد صفحات مكتملة المعالجة لتصديرها.")
+            return
+
+        path_str, _ = QFileDialog.getSaveFileName(self, "تصدير كملف Word", "", "مستندات Word (*.docx)")
+        if not path_str:
+            return
+        path = Path(path_str)
+        if path.suffix.lower() != ".docx":
+            path = path.with_suffix(".docx")
+
+        # Same edited-vs-structured distinction as Markdown export: a
+        # page the user has edited only has edited_text left (a plain
+        # string), so it's added as plain paragraphs instead of being
+        # reformatted through headings/tables it no longer has positional
+        # data for.
+        pages: list[PageContent] = [
+            page.ocr_result.edited_text if page.ocr_result.edited_text is not None else page.ocr_result.document_units
+            for page in exportable_pages
+        ]
+
+        try:
+            export_docx(pages, path)
         except OSError as exc:
             QMessageBox.warning(self, "تعذّر الحفظ", f"تعذّر حفظ الملف:\n{exc}")
             return

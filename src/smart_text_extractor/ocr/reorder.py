@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from smart_text_extractor.core.models import BoundingBox, Rect, TextSegment
+from smart_text_extractor.core.models import BoundingBox, DocumentUnit, Rect, TextSegment
 
 _ARABIC_RANGE = range(0x0600, 0x0700)
 
@@ -478,48 +478,47 @@ def _rows_to_markdown_table(rows: list[list[str]]) -> str:
     return "\n".join(table_lines)
 
 
-def _render_plain_block(block_lines: list[Line], page_median_height: float) -> list[str]:
-    """Renders one non-tabular block as one or more top-level Markdown
-    units: consecutive body-height lines join into a single paragraph
+def _classify_plain_block(block_lines: list[Line], page_median_height: float) -> list[DocumentUnit]:
+    """Classifies one non-tabular block into one or more units:
+    consecutive body-height lines join into a single "paragraph" unit
     (newline-separated, matching assemble_text), but a heading-height
-    line is broken out as its own '## ...' unit so it gets the blank-line
-    spacing Markdown headings need, instead of being folded into a
-    paragraph's interior line — confirmed real: on the page this was
-    calibrated against, the genuine heading is the second line of a
+    line is broken out as its own "heading" unit instead of being folded
+    into a paragraph's interior line — confirmed real: on the page this
+    was calibrated against, the genuine heading is the second line of a
     2-line block (title line, then heading line), not alone in its own
     block, so heading detection has to work at the line level, not just
     flag single-line blocks.
     """
-    units: list[str] = []
+    units: list[DocumentUnit] = []
     paragraph_lines: list[str] = []
     for line in block_lines:
         if _line_median_height(line) > page_median_height * _HEADING_HEIGHT_RATIO:
             if paragraph_lines:
-                units.append("\n".join(paragraph_lines))
+                units.append(DocumentUnit(kind="paragraph", text="\n".join(paragraph_lines)))
                 paragraph_lines = []
-            units.append(f"## {line.text}")
+            units.append(DocumentUnit(kind="heading", text=line.text))
         else:
             paragraph_lines.append(_line_text_with_cell_separators(line))
     if paragraph_lines:
-        units.append("\n".join(paragraph_lines))
+        units.append(DocumentUnit(kind="paragraph", text="\n".join(paragraph_lines)))
     return units
 
 
-def assemble_markdown(lines: list[Line]) -> str:
-    """Structured Markdown export: real tables become Markdown tables and
-    a real heading becomes '## ...', instead of everything flattening
-    into plain paragraphs. Builds entirely on already-validated pieces
-    (the same per-block grouping and cell-boundary detection assemble_text
-    uses) rather than new signal — deliberately does NOT attempt real
-    table-gridline detection from the image: tried it during this
-    session's investigation and found it unreliable on real documents
-    (a naive OpenCV morphological line detector mostly picked up dense
-    text strokes, not drawn borders — see
+def classify_document_units(lines: list[Line]) -> list[DocumentUnit]:
+    """Structured-export classification: real tables become "table" units
+    and a real heading becomes a "heading" unit, instead of everything
+    flattening into plain paragraphs. Builds entirely on already-validated
+    pieces (the same per-block grouping and cell-boundary detection
+    assemble_text uses) rather than new signal — deliberately does NOT
+    attempt real table-gridline detection from the image: tried it during
+    this session's investigation and found it unreliable on real
+    documents (a naive OpenCV morphological line detector mostly picked
+    up dense text strokes, not drawn borders — see
     docs/phases/phase-2-ocr-pipeline.md), so this reuses the
     already-proven word-gap heuristic instead.
     """
     if not lines:
-        return ""
+        return []
 
     page_median_height = _median([word.rect.height for line in lines for word in line.words])
 
@@ -531,7 +530,7 @@ def assemble_markdown(lines: list[Line]) -> str:
             current_block_num = line.block_num
         blocks[-1].append(line)
 
-    rendered_units: list[str] = []
+    units: list[DocumentUnit] = []
     i = 0
     while i < len(blocks):
         block_lines = blocks[i]
@@ -547,14 +546,26 @@ def assemble_markdown(lines: list[Line]) -> str:
             # letting the table below fall back to using its own first
             # data row as a stand-in header.
             rows = [_line_cells(block_lines[0])] + [_line_cells(line) for line in blocks[i + 1]]
-            rendered_units.append(_rows_to_markdown_table(rows))
+            units.append(DocumentUnit(kind="table", rows=rows))
             i += 2
             continue
 
         if _block_is_tabular(block_lines):
-            rendered_units.append(_rows_to_markdown_table([_line_cells(line) for line in block_lines]))
+            units.append(DocumentUnit(kind="table", rows=[_line_cells(line) for line in block_lines]))
         else:
-            rendered_units.extend(_render_plain_block(block_lines, page_median_height))
+            units.extend(_classify_plain_block(block_lines, page_median_height))
         i += 1
 
+    return units
+
+
+def assemble_markdown(lines: list[Line]) -> str:
+    rendered_units: list[str] = []
+    for unit in classify_document_units(lines):
+        if unit.kind == "heading":
+            rendered_units.append(f"## {unit.text}")
+        elif unit.kind == "table":
+            rendered_units.append(_rows_to_markdown_table(unit.rows))
+        else:
+            rendered_units.append(unit.text)
     return "\n\n".join(rendered_units)

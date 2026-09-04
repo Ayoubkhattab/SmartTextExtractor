@@ -12,7 +12,7 @@ import pytest
 
 from PyQt6.QtGui import QTextCursor
 
-from smart_text_extractor.core.models import Document, OcrResult, OcrStatus, SourceType, TextSegment
+from smart_text_extractor.core.models import Document, DocumentUnit, OcrResult, OcrStatus, SourceType, TextSegment
 from smart_text_extractor.scanner.models import ScannerDeviceInfo
 from smart_text_extractor.ui.main_window import MainWindow
 
@@ -259,6 +259,31 @@ def test_export_markdown_skips_pages_excluded_from_range(qtbot, document, sample
 
     assert len(shown) == 1  # no exportable pages left once the only page is excluded
     assert not save_path.exists()
+
+
+def test_export_word_writes_a_real_docx_using_document_units(qtbot, document, sample_image, tmp_path: Path, monkeypatch) -> None:
+    import docx
+
+    units = [DocumentUnit(kind="heading", text="عنوان"), DocumentUnit(kind="paragraph", text="نص الفقرة")]
+    pool = _FakeOcrPool(result=OcrResult(raw_text="RAW", document_units=units))
+    window = MainWindow(document, pool, _FakeScannerService())
+    qtbot.addWidget(window)
+
+    window._add_page(sample_image)
+
+    save_path = tmp_path / "export"  # no .docx suffix — MainWindow must add one
+    monkeypatch.setattr(
+        "smart_text_extractor.ui.main_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(save_path), ""),
+    )
+
+    window._on_export_word()
+
+    written_path = tmp_path / "export.docx"
+    assert written_path.exists()
+    reopened = docx.Document(str(written_path))
+    assert any(p.text == "عنوان" and p.style.name == "Heading 2" for p in reopened.paragraphs)
+    assert any(p.text == "نص الفقرة" for p in reopened.paragraphs)
 
 
 def test_opening_a_multi_page_pdf_adds_one_page_per_pdf_page(qtbot, document, tmp_path: Path) -> None:

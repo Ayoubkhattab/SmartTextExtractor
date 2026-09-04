@@ -82,6 +82,16 @@ def _coverage(shape: Rect, word: Rect) -> float:
     return ((x1 - x0) * (y1 - y0)) / word_area if word_area else 0.0
 
 
+MIN_CONTAINER_SIZE_POINTS = 40
+"""Smallest filled shape treated as a container box rather than a
+highlight behind a word or a rule line."""
+
+MAX_CONTAINER_PAGE_FRACTION = 0.8
+"""A shape covering more of the page than this is the page's own
+background, not a box on it — every one of this project's documents draws
+a full-page white rectangle first."""
+
+
 class PageStyleIndex:
     """Answers style_for(word_rect) for one page.
 
@@ -109,10 +119,26 @@ class PageStyleIndex:
                         )
                     )
 
+        self.container_boxes: list[tuple[Rect, str]] = []
+        page_area = max(page.rect.width * page.rect.height, 1)
+
         for drawing in page.get_drawings():
             fill = _fill_to_hex(drawing.get("fill"))
-            if fill is not None:
-                self._highlights.append((_scaled(drawing["rect"], points_to_pixels), fill))
+            if fill is None:
+                continue
+            rect = drawing["rect"]
+            scaled = _scaled(rect, points_to_pixels)
+            self._highlights.append((scaled, fill))
+
+            # A large filled shape is a box the page draws content inside —
+            # the callout panels a document lays its sidebar content in —
+            # rather than a mark behind a word. Reproducing those is what
+            # makes an output page look like its source instead of a single
+            # flat column of text.
+            covers_page = (rect.width * rect.height) / page_area > MAX_CONTAINER_PAGE_FRACTION
+            big_enough = rect.width >= MIN_CONTAINER_SIZE_POINTS and rect.height >= MIN_CONTAINER_SIZE_POINTS
+            if big_enough and not covers_page:
+                self.container_boxes.append((scaled, fill))
 
     def style_for(self, word_rect: Rect) -> TextStyle | None:
         span_style: TextStyle | None = None

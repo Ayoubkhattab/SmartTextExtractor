@@ -92,6 +92,7 @@ _PAGE_SURROUND_COLOR = "#e6e9ee"
 _PAGE_SHADOW_MARGIN = 24  # breathing room between the sheet and the panel edge
 _MAX_PAGE_SCALE = 1.6  # never blow a small page up past this, however wide the panel gets
 _DEFAULT_PAGE_MARGIN = 12  # used when the source has no known geometry
+_BOX_PADDING = 8  # inside a drawn panel, so its text does not touch the fill's edge
 
 _STYLESHEET = f"""
 QMainWindow, QWidget {{ background-color: #f4f5f7; color: {_TEXT_COLOR}; font-family: "Segoe UI", "Tahoma", sans-serif; font-size: 13px; }}
@@ -716,7 +717,9 @@ class MainWindow(QMainWindow):
         cursor = QTextCursor(self._text_edit.document())
         self._insert_segments(cursor, segments)
 
-    def _insert_table(self, cursor: QTextCursor, rows: list[list[list[TextSegment]]]) -> None:
+    def _insert_table(
+        self, cursor: QTextCursor, rows: list[list[list[TextSegment]]], box_fill: str | None = None
+    ) -> None:
         """Builds a real table grid instead of pipe-separated text —
         right-to-left, so cell 0 (the first cell in reading order) lands
         in the rightmost visual column: confirmed empirically that
@@ -728,9 +731,17 @@ class MainWindow(QMainWindow):
         table_format = QTextTableFormat()
         table_format.setCellPadding(4)
         table_format.setCellSpacing(0)
-        table_format.setBorder(1)
-        table_format.setBorderStyle(QTextFrameFormat.BorderStyle.BorderStyle_Solid)
-        table_format.setBorderBrush(_TABLE_BORDER_COLOR)
+        if box_fill is None:
+            table_format.setBorder(1)
+            table_format.setBorderStyle(QTextFrameFormat.BorderStyle.BorderStyle_Solid)
+            table_format.setBorderBrush(_TABLE_BORDER_COLOR)
+        else:
+            # A panel the page draws its content inside, not a data table:
+            # it is defined by its fill, and a grid line around it is
+            # something the source never had.
+            table_format.setBorder(0)
+            table_format.setCellPadding(_BOX_PADDING)
+            table_format.setBackground(QColor(box_fill))
         table = cursor.insertTable(len(rows), column_count, table_format)
         for row_index, row in enumerate(rows):
             for logical_column, cell_segments in enumerate(row):
@@ -741,7 +752,7 @@ class MainWindow(QMainWindow):
                 # and painting only the text's background leaves a
                 # colour-flecked row instead of the solid bar the original
                 # shows.
-                fill = _dominant_highlight(cell_segments)
+                fill = box_fill or _dominant_highlight(cell_segments)
                 if fill is not None:
                     cell_format = cell.format()
                     cell_format.setBackground(QColor(fill))
@@ -839,7 +850,7 @@ class MainWindow(QMainWindow):
             if unit.kind == "heading":
                 self._insert_segments(cursor, unit.segments, heading=True)
             elif unit.kind == "table":
-                self._insert_table(cursor, unit.rows)
+                self._insert_table(cursor, unit.rows, unit.box_fill)
             else:
                 self._insert_segments(cursor, unit.segments)
 

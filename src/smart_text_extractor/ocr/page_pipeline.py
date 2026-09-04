@@ -26,6 +26,7 @@ from __future__ import annotations
 import pymupdf
 
 from smart_text_extractor.core.models import OcrResult, Page
+from smart_text_extractor.ocr.layout_boxes import group_units_into_boxes
 from smart_text_extractor.ocr.native_pdf_style import PageStyleIndex
 from smart_text_extractor.ocr.native_pdf_text import extract_native_text_result, page_layout_of
 
@@ -67,6 +68,9 @@ def run_page(page: Page, engine) -> OcrResult:
                     return native_result
 
             ocr_result.page_layout = layout
+            ocr_result.document_units = group_units_into_boxes(
+                ocr_result.document_units, style_index.container_boxes
+            )
             return ocr_result
     except Exception:  # noqa: BLE001 - a missing/damaged source must still yield the page's text
         return engine.run(str(page.image_path))

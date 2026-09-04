@@ -34,6 +34,7 @@ from __future__ import annotations
 import pymupdf
 
 from smart_text_extractor.core.models import BoundingBox, DocumentUnit, OcrResult, PageLayout, Rect
+from smart_text_extractor.ocr.layout_boxes import group_units_into_boxes
 from smart_text_extractor.ocr.native_pdf_style import PageStyleIndex
 from smart_text_extractor.ocr.native_text_repair import find_orphan_ocr_words, repair_native_words
 from smart_text_extractor.ocr.reorder import (
@@ -343,6 +344,7 @@ def extract_native_text_result(
     raw_text = "".join(segment.text for segment in segments)
 
     document_units = classify_document_units(ordered_lines)
+    document_units = group_units_into_boxes(document_units, style_index.container_boxes)
     _apply_vertical_rhythm(document_units, points_to_pixels)
 
     return OcrResult(

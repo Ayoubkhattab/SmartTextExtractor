@@ -54,6 +54,17 @@ def _set_table_rtl(table: docx.table.Table) -> None:
     table_properties.append(table_properties.makeelement(qn("w:bidiVisual"), {}))
 
 
+def _shade_cell(cell, fill: str) -> None:
+    """Fills a Word table cell — the OOXML w:shd element, which is how Word
+    records a cell background; python-docx has no direct API for it."""
+    properties = cell._tc.get_or_add_tcPr()
+    shading = properties.makeelement(qn("w:shd"), {})
+    shading.set(qn("w:val"), "clear")
+    shading.set(qn("w:color"), "auto")
+    shading.set(qn("w:fill"), fill.lstrip("#").upper())
+    properties.append(shading)
+
+
 def _segments_to_text(segments: list[TextSegment]) -> str:
     return "".join(segment.text for segment in segments)
 
@@ -97,17 +108,23 @@ def _add_styled_runs(paragraph: Paragraph, segments: list[TextSegment]) -> None:
     flush()
 
 
-def _add_table(document: docx.document.Document, rows: list[list[list[TextSegment]]]) -> None:
+def _add_table(
+    document: docx.document.Document, rows: list[list[list[TextSegment]]], box_fill: str | None = None
+) -> None:
     if not rows:
         return
     column_count = max(len(row) for row in rows)
     table = document.add_table(rows=len(rows), cols=column_count)
-    table.style = "Table Grid"
+    # A drawn panel is defined by its fill, not by grid lines the source
+    # never had; a real data table keeps its borders.
+    table.style = "Table Grid" if box_fill is None else "Normal Table"
     _set_table_rtl(table)
     for row_index, row in enumerate(rows):
         for column_index in range(column_count):
             cell = table.cell(row_index, column_index)
             cell.text = _segments_to_text(row[column_index]) if column_index < len(row) else ""
+            if box_fill is not None:
+                _shade_cell(cell, box_fill)
             for paragraph in cell.paragraphs:
                 _set_rtl(paragraph)
 
@@ -115,7 +132,7 @@ def _add_table(document: docx.document.Document, rows: list[list[list[TextSegmen
 def _add_units(document: docx.document.Document, units: list[DocumentUnit]) -> None:
     for unit in units:
         if unit.kind == "table":
-            _add_table(document, unit.rows)
+            _add_table(document, unit.rows, unit.box_fill)
             continue
 
         # add_heading()/add_paragraph() with no text, then styled runs: the

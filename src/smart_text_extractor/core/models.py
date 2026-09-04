@@ -61,6 +61,29 @@ class TextStyle:
 
 
 @dataclass(frozen=True)
+class PageLayout:
+    """The physical page an exported document should reproduce (§7.1.1
+    extension) — its size and its margins, in PDF points (1/72in).
+
+    Taken from the source page rather than assumed: measured on this
+    project's own documents, one is exactly A4 (595.3 x 841.9pt) and
+    another is US Letter (612 x 792pt), so hardcoding either would put half
+    the exports on the wrong paper and re-flow every line.
+
+    Margins are measured from where the text actually sits, which is what
+    decides the line width and therefore where lines break — the single
+    biggest source of "the export needs re-formatting" when it is wrong.
+    """
+
+    width_points: float
+    height_points: float
+    margin_left: float
+    margin_right: float
+    margin_top: float
+    margin_bottom: float
+
+
+@dataclass(frozen=True)
 class BoundingBox:
     """One recognized word and its position on the source image (§7.3).
 
@@ -121,6 +144,7 @@ class DocumentUnit:
     rows: list[list[list[TextSegment]]] = field(default_factory=list)  # table cell rows (each cell its own segment list); unused outside kind == "table"
     bbox: Rect | None = None  # union of this unit's source words' positions on the page image (pixels, same space as OcrResult.word_boxes) — lets the hybrid OCR engine (ocr/hybrid_engine.py) crop exactly this region for a second pass; None only for a unit built without positional data (e.g. constructed directly by a test)
     alignment: str = "natural"  # "natural" (follow the text's own direction) | "center" — measured from where the unit actually sits in the page's text column, so a centred title stays centred in the output
+    space_before_points: float = 0.0  # blank vertical space above this unit on the source page, so the export keeps the same rhythm instead of collapsing everything to a uniform gap
 
 
 @dataclass
@@ -132,6 +156,7 @@ class OcrResult:
     markdown: str = ""  # structured export (§7.1.1): real tables/headings, not just flat text
     document_units: list[DocumentUnit] = field(default_factory=list)  # same structure, for non-Markdown exports (Word)
     confidence_score: float = 0.0
+    page_layout: PageLayout | None = None  # the source page's real size/margins, when it had them (a PDF does; a bare image does not)
 
 
 @dataclass(frozen=True)

@@ -103,3 +103,79 @@ class TestStyleSurvivesTheRepair:
 
         assert repaired.text == "البرمجة"
         assert repaired.style == style
+
+
+@requires_real_pdf
+class TestPageGeometry:
+    """Reproducing the source page's paper size and margins is what keeps an
+    export from re-flowing every line — measured, not assumed: one of this
+    project's documents is A4 and another is US Letter."""
+
+    def _result(self):
+        import pymupdf
+
+        from smart_text_extractor.ocr.native_pdf_text import extract_native_text_result
+
+        with pymupdf.open(str(REAL_PDF)) as document:
+            return extract_native_text_result(document.load_page(0), render_dpi=300)
+
+    def test_page_size_is_the_real_a4_of_the_source(self) -> None:
+        layout = self._result().page_layout
+
+        assert layout.width_points == pytest.approx(595.3, abs=1)
+        assert layout.height_points == pytest.approx(841.9, abs=1)
+
+    def test_margins_come_from_where_the_text_actually_sits(self) -> None:
+        layout = self._result().page_layout
+
+        assert layout.margin_left == pytest.approx(70.8, abs=1)
+        assert layout.margin_right == pytest.approx(56.6, abs=1)
+
+    def test_a_real_vertical_gap_is_recorded_as_space_above_the_block(self) -> None:
+        """The source page has a wide blank band between its title block and
+        the introduction; without recording it the export spaces every
+        block evenly and needs manual re-spacing."""
+        units = self._result().document_units
+        intro = next(u for u in units if "مقدمة" in "".join(s.text for s in u.segments))
+
+        assert intro.space_before_points > 50
+
+    def test_ordinary_line_spacing_is_not_mistaken_for_a_gap(self) -> None:
+        units = self._result().document_units
+        body = [u for u in units if u.kind == "paragraph" and u.space_before_points == 0]
+
+        assert body, "consecutive body paragraphs should carry no extra space"
+
+
+class TestPageLayoutInWord:
+    def test_word_uses_the_sources_paper_and_margins(self, tmp_path) -> None:
+        import docx
+
+        from smart_text_extractor.core.models import PageLayout
+        from smart_text_extractor.export.docx_export import export_docx
+
+        layout = PageLayout(595.3, 841.9, 70.8, 56.6, 56.6, 56.6)
+        out = tmp_path / "geometry.docx"
+
+        export_docx([[]], out, layout)
+
+        section = docx.Document(str(out)).sections[0]
+        assert section.page_width.pt == pytest.approx(595.3, abs=1)
+        assert section.page_height.pt == pytest.approx(841.9, abs=1)
+        # the text column is what decides where lines break
+        text_width = section.page_width.pt - section.left_margin.pt - section.right_margin.pt
+        assert text_width == pytest.approx(595.3 - 70.8 - 56.6, abs=1)
+
+    def test_without_a_layout_word_keeps_its_own_defaults(self, tmp_path) -> None:
+        """A page with no known geometry (an image, an OCR'd scan) must not
+        get a made-up page size imposed on it."""
+        import docx
+
+        from smart_text_extractor.export.docx_export import export_docx
+
+        out = tmp_path / "default.docx"
+
+        export_docx([[]], out)
+
+        section = docx.Document(str(out)).sections[0]
+        assert section.page_width.pt == pytest.approx(612, abs=1)  # Word's own Letter default

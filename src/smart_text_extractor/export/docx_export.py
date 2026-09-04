@@ -15,7 +15,7 @@ from docx.shared import Pt, RGBColor
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
-from smart_text_extractor.core.models import DocumentUnit, TextSegment
+from smart_text_extractor.core.models import DocumentUnit, PageLayout, TextSegment
 
 # A page's content is either its still-structured OCR result (most pages)
 # or a plain string — a page the user has edited only has edited_text, a
@@ -126,6 +126,10 @@ def _add_units(document: docx.document.Document, units: list[DocumentUnit]) -> N
         _set_rtl(paragraph)
         if unit.alignment == "center":
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if unit.space_before_points:
+            # Reproduces the blank space that sat above this block on the
+            # source page, instead of Word's uniform paragraph gap.
+            paragraph.paragraph_format.space_before = Pt(unit.space_before_points)
         _add_styled_runs(paragraph, unit.segments)
 
 
@@ -137,11 +141,40 @@ def _add_plain_text(document: docx.document.Document, text: str) -> None:
         _set_rtl(document.add_paragraph(line))
 
 
-def build_docx(pages: list[PageContent]) -> docx.document.Document:
+def _apply_page_layout(document: docx.document.Document, layout: PageLayout) -> None:
+    """Puts the Word document on the same paper, with the same margins, as
+    the page it came from.
+
+    This is the single biggest thing standing between an export and "no
+    re-formatting needed". Word's default is US Letter with 1in margins; a
+    document that was A4 with a 70pt left margin re-flows every single line
+    against that, so line breaks, page breaks and anything positioned
+    relative to them all move. Measured on this project's own files, one
+    source is A4 and another is Letter, so the size is taken from the
+    source rather than defaulted either way.
+    """
+    for section in document.sections:
+        section.page_width = Pt(layout.width_points)
+        section.page_height = Pt(layout.height_points)
+        section.left_margin = Pt(layout.margin_left)
+        section.right_margin = Pt(layout.margin_right)
+        section.top_margin = Pt(layout.margin_top)
+        section.bottom_margin = Pt(layout.margin_bottom)
+
+
+def build_docx(pages: list[PageContent], page_layout: PageLayout | None = None) -> docx.document.Document:
     """pages: one entry per exported page, in export order. A page
     boundary becomes a real Word page break, not just blank space — Word
-    has that primitive and Markdown doesn't."""
+    has that primitive and Markdown doesn't.
+
+    page_layout, when given, is the source page geometry to reproduce (see
+    _apply_page_layout). It applies to the whole document because a Word
+    section spans pages; the documents this exports are single-geometry, so
+    the first page's layout is the document's layout.
+    """
     document = docx.Document()
+    if page_layout is not None:
+        _apply_page_layout(document, page_layout)
     for page_index, content in enumerate(pages):
         if page_index > 0:
             document.add_page_break()
@@ -152,5 +185,5 @@ def build_docx(pages: list[PageContent]) -> docx.document.Document:
     return document
 
 
-def export_docx(pages: list[PageContent], path: Path) -> None:
-    build_docx(pages).save(str(path))
+def export_docx(pages: list[PageContent], path: Path, page_layout: PageLayout | None = None) -> None:
+    build_docx(pages, page_layout).save(str(path))

@@ -47,6 +47,7 @@ from smart_text_extractor.core.models import (
     OcrStatus,
     Page,
     PageLockedError,
+    PageLayout,
     PdfPageSource,
     TextSegment,
     TextStyle,
@@ -89,6 +90,12 @@ _TABLE_BORDER_COLOR = QColor("#c7ccd4")
 # little to keep the on-screen hierarchy (24/18/14/12pt in the real file)
 # as visibly distinct as it is on paper.
 _PDF_POINT_TO_SCREEN_SCALE = 1.15
+
+# Page-as-paper presentation (see MainWindow._apply_page_appearance).
+_PAGE_SURROUND_COLOR = "#e6e9ee"
+_PAGE_SHADOW_MARGIN = 24  # breathing room between the sheet and the panel edge
+_MAX_PAGE_SCALE = 1.6  # never blow a small page up past this, however wide the panel gets
+_DEFAULT_PAGE_MARGIN = 12  # used when the source has no known geometry
 
 _STYLESHEET = f"""
 QMainWindow, QWidget {{ background-color: #f4f5f7; color: {_TEXT_COLOR}; font-family: "Segoe UI", "Tahoma", sans-serif; font-size: 13px; }}
@@ -160,6 +167,7 @@ class MainWindow(QMainWindow):
         self._scanner_service = scanner_service
         self._suppress_text_changed = False
         self._suppress_item_changed = False
+        self._current_page_layout: PageLayout | None = None
 
         self._bridge = _OcrBridge()
         self._bridge.page_done.connect(self._on_page_done)
@@ -388,8 +396,14 @@ class MainWindow(QMainWindow):
             for page in exportable_pages
         ]
 
+        # The first exported page's geometry becomes the document's — a
+        # Word section spans pages, and these exports are single-geometry.
+        page_layout = next(
+            (page.ocr_result.page_layout for page in exportable_pages if page.ocr_result.page_layout), None
+        )
+
         try:
-            export_docx(pages, path)
+            export_docx(pages, path, page_layout)
         except OSError as exc:
             QMessageBox.warning(self, "تعذّر الحفظ", f"تعذّر حفظ الملف:\n{exc}")
             return
@@ -439,6 +453,7 @@ class MainWindow(QMainWindow):
         item = self._page_list_item(page)
         self._page_list.addItem(item)
         self._suppress_item_changed = False
+        self._current_page_layout: PageLayout | None = None
         index = self._page_list.count() - 1
         self._page_list.setCurrentRow(index)
 
@@ -496,6 +511,7 @@ class MainWindow(QMainWindow):
         for page in self._document.pages:
             self._page_list.addItem(self._page_list_item(page))
         self._suppress_item_changed = False
+        self._current_page_layout: PageLayout | None = None
         if 0 <= selected_row < self._page_list.count():
             self._page_list.setCurrentRow(selected_row)
 
@@ -547,6 +563,7 @@ class MainWindow(QMainWindow):
         suffix = f" ({error})" if error is not None else ""
         item.setText(f"{page.image_path.name}\n{_status_label(page)}{suffix}")
         self._suppress_item_changed = False
+        self._current_page_layout: PageLayout | None = None
         self.statusBar().showMessage(
             f"اكتملت معالجة {page.image_path.name}" if error is None else f"فشلت معالجة {page.image_path.name}"
         )
@@ -654,7 +671,75 @@ class MainWindow(QMainWindow):
                 self._insert_segments(cell_cursor, cell_segments)
         cursor.movePosition(QTextCursor.MoveOperation.End)
 
-    def _render_document_units(self, units: list[DocumentUnit]) -> None:
+    def _apply_page_appearance(self, layout: PageLayout | None) -> None:
+        """Makes the panel look like the sheet of paper the text came from —
+        a white page with the document's own margins, on a grey surround —
+        instead of a full-width text box.
+
+        The point is not decoration: lines are wrapped at the source page's
+        real text width, so a paragraph breaks across the same number of
+        lines here as it does in the original and in the export. A
+        full-width panel wraps them somewhere else entirely, which is what
+        made the output look unlike the document even when every word was
+        right.
+
+        A page with no known geometry (an image, or an OCR'd page) keeps
+        the previous full-width behaviour — there is nothing to reproduce.
+        """
+        self._current_page_layout = layout
+        document = self._text_edit.document()
+        root_format = document.rootFrame().frameFormat()
+
+        if layout is None:
+            self._text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+            root_format.setBackground(QColor("#ffffff"))
+            root_format.setLeftMargin(_DEFAULT_PAGE_MARGIN)
+            root_format.setRightMargin(_DEFAULT_PAGE_MARGIN)
+            root_format.setTopMargin(_DEFAULT_PAGE_MARGIN)
+            root_format.setBottomMargin(_DEFAULT_PAGE_MARGIN)
+            document.rootFrame().setFrameFormat(root_format)
+            self._text_edit.setStyleSheet("")
+            self._text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            return
+
+        # Fit the whole page width into the panel, so the paper is visible
+        # as paper rather than cropped, and scale everything on it equally.
+        # Clamped to the viewport rather than merely derived from it: a wrap
+        # width even slightly wider than the panel adds a horizontal
+        # scrollbar, which is exactly what a page view should never need.
+        available = max(self._text_edit.viewport().width() - _PAGE_SHADOW_MARGIN * 2, 200)
+        scale = min(available / layout.width_points, _MAX_PAGE_SCALE)
+
+        root_format.setBackground(QColor("#ffffff"))
+        root_format.setLeftMargin(layout.margin_left * scale)
+        root_format.setRightMargin(layout.margin_right * scale)
+        root_format.setTopMargin(layout.margin_top * scale)
+        root_format.setBottomMargin(layout.margin_bottom * scale)
+        document.rootFrame().setFrameFormat(root_format)
+
+        self._text_edit.setLineWrapMode(QTextEdit.LineWrapMode.FixedPixelWidth)
+        self._text_edit.setLineWrapColumnOrWidth(round(layout.width_points * scale))
+        # Grey surround so the white page reads as a sheet sitting on a desk.
+        self._text_edit.setStyleSheet(f"QTextEdit {{ background-color: {_PAGE_SURROUND_COLOR}; }}")
+        # The sheet is always fitted to the panel, so sideways scrolling can
+        # only ever be an artifact of it — never something the reader needs.
+        self._text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    def resizeEvent(self, event) -> None:
+        """Re-fits the page to the panel when the window changes size.
+
+        The sheet's scale is derived from the panel's width, and that width
+        is not final until Qt has laid the window out — computing it once at
+        render time leaves the wrap width stale (and a stale one that
+        overshoots produces a horizontal scrollbar, which a page view should
+        never need). Re-applying is cheap: it only rewrites the root frame
+        format and the wrap width, never the text.
+        """
+        super().resizeEvent(event)
+        if self._current_page_layout is not None:
+            self._apply_page_appearance(self._current_page_layout)
+
+    def _render_document_units(self, units: list[DocumentUnit], page_layout: PageLayout | None = None) -> None:
         """Paints OcrResult.document_units into the text editor as real
         structure — an actual table grid, a visually distinct heading —
         instead of flattening everything to plain text, while every word
@@ -663,6 +748,9 @@ class MainWindow(QMainWindow):
         read like the original page's layout instead of a flat text
         dump, addressing a real user request for exactly that."""
         self._text_edit.clear()
+        # After clear(), never before: clearing the document resets the root
+        # frame format the page appearance lives in.
+        self._apply_page_appearance(page_layout)
         cursor = QTextCursor(self._text_edit.document())
         for index, unit in enumerate(units):
             if index > 0:
@@ -709,7 +797,7 @@ class MainWindow(QMainWindow):
                 # plainly rather than highlighting stale confidence data.
                 self._text_edit.setPlainText(page.ocr_result.edited_text)
             elif page.ocr_result.document_units:
-                self._render_document_units(page.ocr_result.document_units)
+                self._render_document_units(page.ocr_result.document_units, page.ocr_result.page_layout)
             elif page.ocr_result.segments:
                 self._render_segments(page.ocr_result.segments)
             else:
@@ -737,6 +825,7 @@ class MainWindow(QMainWindow):
         self._text_edit.verticalScrollBar().setValue(0)
         self._suppress_text_changed = False
         self._suppress_item_changed = False
+        self._current_page_layout: PageLayout | None = None
 
     def _on_text_edited(self) -> None:
         if self._suppress_text_changed:

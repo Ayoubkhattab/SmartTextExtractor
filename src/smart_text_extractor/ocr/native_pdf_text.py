@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import pymupdf
 
-from smart_text_extractor.core.models import BoundingBox, OcrResult, Rect
+from smart_text_extractor.core.models import BoundingBox, DocumentUnit, OcrResult, PageLayout, Rect
 from smart_text_extractor.ocr.native_pdf_style import PageStyleIndex
 from smart_text_extractor.ocr.native_text_repair import find_orphan_ocr_words, repair_native_words
 from smart_text_extractor.ocr.reorder import (
@@ -91,6 +91,62 @@ def corrupt_token_ratio(boxes: list[BoundingBox]) -> float:
         return 0.0
     corrupt = sum(1 for box in boxes if box.text and box.text[0] in _COMBINING_MARKS)
     return corrupt / len(boxes)
+
+
+def _page_layout(page: pymupdf.Page) -> PageLayout:
+    """The page's real size and the margins its text actually observes.
+
+    Size comes straight from the page. Margins are measured from the text
+    rather than from any page-box metadata, because it is the text's own
+    extent that decides how wide a line may be — and reproducing that width
+    is what stops an export from re-flowing every line somewhere else.
+
+    A page whose text starts unusually far down (a title page) would give a
+    misleadingly large top margin, so the top and bottom fall back to
+    matching the horizontal margins, which are stable: vertical position
+    within the page is reproduced by each unit's own space_before_points
+    instead, where it belongs.
+    """
+    rect = page.rect
+    words = page.get_text("words")
+    if not words:
+        default = min(rect.width, rect.height) * 0.1
+        return PageLayout(rect.width, rect.height, default, default, default, default)
+
+    left = min(word[0] for word in words)
+    right = rect.width - max(word[2] for word in words)
+    vertical = min(left, right)
+    return PageLayout(
+        width_points=rect.width,
+        height_points=rect.height,
+        margin_left=left,
+        margin_right=right,
+        margin_top=vertical,
+        margin_bottom=vertical,
+    )
+
+
+def _apply_vertical_rhythm(units: list[DocumentUnit], points_to_pixels: float) -> None:
+    """Records how much blank space sat above each unit on the page.
+
+    Without this every block is separated by the exporter's own uniform
+    paragraph gap, which is why an export of a page with real vertical
+    structure (a title block, then a wide gap, then the body) comes out
+    evenly spaced and needs manual re-spacing. The gap is stored in points
+    so it survives whatever DPI the page was rendered at.
+
+    Only clearly deliberate space is recorded: a gap no bigger than the
+    unit's own line height is ordinary line spacing, not a break.
+    """
+    previous_bottom: float | None = None
+    for unit in units:
+        if unit.bbox is None:
+            continue
+        if previous_bottom is not None:
+            gap_pixels = unit.bbox.y - previous_bottom
+            if gap_pixels > unit.bbox.height:
+                unit.space_before_points = round(gap_pixels / points_to_pixels, 1)
+        previous_bottom = unit.bbox.y + unit.bbox.height
 
 
 def _line_reading_order(boxes: list[BoundingBox]) -> list[BoundingBox]:
@@ -286,11 +342,15 @@ def extract_native_text_result(
     segments = assemble_text_segments(ordered_lines)
     raw_text = "".join(segment.text for segment in segments)
 
+    document_units = classify_document_units(ordered_lines)
+    _apply_vertical_rhythm(document_units, points_to_pixels)
+
     return OcrResult(
         raw_text=raw_text,
         word_boxes=[box for box, *_ in tagged],
         segments=segments,
         markdown=assemble_markdown(ordered_lines),
-        document_units=classify_document_units(ordered_lines),
+        document_units=document_units,
         confidence_score=100.0,
+        page_layout=_page_layout(page),
     )

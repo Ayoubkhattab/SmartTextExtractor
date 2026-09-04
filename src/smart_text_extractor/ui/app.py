@@ -20,6 +20,18 @@ from smart_text_extractor.ocr.locate import find_tessdata_dir, find_tesseract_cm
 from smart_text_extractor.scanner.service import ScannerService
 from smart_text_extractor.ui.main_window import MainWindow
 
+# HybridOcrEngine (ocr/hybrid_engine.py, ocr/qari_engine.py) is deliberately
+# NOT wired in here as the active engine: a real, full-document CER/WER
+# comparison (docs/phases/phase-2-ocr-pipeline.md, 17th finding) measured it
+# NET WORSE than Tesseract alone — word-recognition-only accuracy dropped
+# from 67.3% to 56.3%, and it is 3-5x slower per page. Every earlier test
+# this session found Qari excellent on whole-page prose; per-DocumentUnit
+# cropping specifically (the only way found so far to keep tables away from
+# Qari) is what regressed it, most likely by stripping the surrounding-page
+# context Qari relied on. The code is kept, tested, and importable for a
+# future integration strategy (larger crops, whole-page + output-splitting,
+# ...) — just not defaulted on until one actually measures better.
+
 
 def main() -> int:
     app = QApplication(sys.argv)

@@ -308,6 +308,34 @@ def test_opening_a_multi_page_pdf_adds_one_page_per_pdf_page(qtbot, document, tm
     assert len(pool.submitted_pages) == 3
 
 
+def test_opening_a_pdf_page_with_a_native_text_layer_skips_ocr_entirely(qtbot, document, tmp_path: Path) -> None:
+    """A PDF page with a real, substantial embedded text layer (§7.1
+    extension) is DONE immediately from that text — it never reaches the
+    OCR pool at all, since there's no recognition step needed or run."""
+    import pymupdf
+
+    pdf_path = tmp_path / "doc.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=400)
+    text = " ".join(f"word{i}" for i in range(20))  # well over MIN_WORDS_FOR_NATIVE_TEXT
+    page.insert_textbox(pymupdf.Rect(20, 20, 580, 380), text, fontsize=14)
+    doc.save(str(pdf_path))
+    doc.close()
+
+    pool = _FakeOcrPool()
+    window = MainWindow(document, pool, _FakeScannerService())
+    qtbot.addWidget(window)
+
+    window._open_file(pdf_path)
+
+    assert len(document.pages) == 1
+    assert pool.submitted_pages == []  # never went through OCR
+    assert document.pages[0].ocr_status is OcrStatus.DONE
+    assert document.pages[0].ocr_result.confidence_score == 100.0
+    assert "word0" in document.pages[0].ocr_result.raw_text
+    assert "نص أصلي" in window._page_list.item(0).text()
+
+
 def test_opening_a_broken_pdf_shows_a_warning_not_a_crash(qtbot, document, tmp_path: Path, monkeypatch) -> None:
     fake_pdf = tmp_path / "not_really_a_pdf.pdf"
     fake_pdf.write_bytes(b"this is not a valid pdf file")

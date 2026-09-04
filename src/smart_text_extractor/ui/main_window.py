@@ -30,8 +30,8 @@ from PyQt6.QtWidgets import (
 )
 
 from smart_text_extractor.concurrency.ocr_worker_pool import OcrWorkerPool
-from smart_text_extractor.core.models import Document, OcrStatus, Page, TextSegment
-from smart_text_extractor.core.pdf_import import render_pdf_to_images
+from smart_text_extractor.core.models import Document, OcrResult, OcrStatus, Page, TextSegment
+from smart_text_extractor.core.pdf_import import import_pdf_pages
 from smart_text_extractor.export.docx_export import PageContent, export_docx
 from smart_text_extractor.scanner.service import ScannerService
 
@@ -213,12 +213,12 @@ class MainWindow(QMainWindow):
     def _open_file(self, path: Path) -> None:
         if path.suffix.lower() == ".pdf":
             try:
-                image_paths = render_pdf_to_images(path, self._document.temp_dir_path)
+                page_imports = import_pdf_pages(path, self._document.temp_dir_path)
             except Exception as exc:  # noqa: BLE001 - surfaced to the user, not a crash
                 QMessageBox.warning(self, "تعذّرت قراءة الملف", f"تعذّر فتح {path.name}:\n{exc}")
                 return
-            for image_path in image_paths:
-                self._add_page(image_path)
+            for page_import in page_imports:
+                self._add_page(page_import.image_path, page_import.native_result)
         else:
             self._add_page(path)
 
@@ -308,11 +308,25 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(f"تم تصدير {len(exportable_pages)} صفحة إلى {path.name}")
 
-    def _add_page(self, image_path: Path) -> None:
+    def _add_page(self, image_path: Path, native_result: OcrResult | None = None) -> None:
         page = self._document.add_page(image_path)
         item = QListWidgetItem(self._thumbnail_icon(image_path), f"{image_path.name}\nقيد المعالجة")
         self._page_list.addItem(item)
-        self._page_list.setCurrentRow(self._page_list.count() - 1)
+        index = self._page_list.count() - 1
+        self._page_list.setCurrentRow(index)
+
+        if native_result is not None:
+            # A PDF page with its own real, embedded text layer (§7.1
+            # extension) — extracted directly, no OCR ever run on it, so
+            # it's DONE immediately instead of going through the pool.
+            page.ocr_result = native_result
+            page.ocr_status = OcrStatus.DONE
+            item.setText(f"{image_path.name}\nتم ✓ (نص أصلي)")
+            self.statusBar().showMessage(f"تم استخراج {image_path.name} مباشرة من نص الملف")
+            if self._page_list.currentRow() == index:
+                self._refresh_detail_panel(page)
+            return
+
         self.statusBar().showMessage(f"تجري معالجة {image_path.name}...")
         self._ocr_pool.submit(page, lambda p, err: self._bridge.page_done.emit(p, err))
 

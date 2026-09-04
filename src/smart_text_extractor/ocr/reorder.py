@@ -188,6 +188,35 @@ def merge_dual_language_passes(
     return merged
 
 
+# Same-script (Arabic -> Arabic) known-misread corrections — deliberately
+# NOT a general fuzzy-match/edit-distance dictionary: that approach was
+# tried and rejected (docs/phases/phase-2-ocr-pipeline.md) after real data
+# showed it risks "correcting" a genuinely different, correct word into
+# the wrong one (Arabic's pervasive single-letter prefixes/suffixes mean
+# many real word pairs are exactly one edit apart). This is instead a
+# small, hand-verified list of specific tokens confirmed to have no
+# legitimate alternate reading — every entry here was checked to not be a
+# real Arabic word before being added, so there is no ambiguity to weigh
+# against. "ميندس" -> "مهندس" (ه misread as ي, most likely at small
+# table-cell font sizes): confirmed real, 7 out of 7 occurrences on one
+# page, all wrong, none plausibly "ميندس" as an intended word.
+_KNOWN_ARABIC_MISREADS = {
+    "ميندس": "مهندس",
+}
+
+
+def correct_known_arabic_misreads(
+    words: list[tuple[BoundingBox, int, int, int]],
+) -> list[tuple[BoundingBox, int, int, int]]:
+    corrected: list[tuple[BoundingBox, int, int, int]] = []
+    for box, block, par, line in words:
+        replacement = _KNOWN_ARABIC_MISREADS.get(box.text)
+        if replacement is not None:
+            box = BoundingBox(text=replacement, rect=box.rect, confidence=box.confidence)
+        corrected.append((box, block, par, line))
+    return corrected
+
+
 def _split_line_into_column_runs(line: Line, gap_multiplier: float = 3.0) -> list[list[BoundingBox]]:
     """A single Tesseract "line" can actually span two visually distinct
     columns: empirically (docs/phases/phase-2-ocr-pipeline.md), Tesseract's

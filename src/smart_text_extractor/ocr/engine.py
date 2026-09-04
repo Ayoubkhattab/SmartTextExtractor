@@ -18,6 +18,7 @@ from smart_text_extractor.ocr.reorder import (
     assemble_markdown,
     assemble_text_segments,
     classify_document_units,
+    correct_known_arabic_misreads,
     group_into_lines,
     merge_dual_language_passes,
     order_lines_reading_order,
@@ -83,6 +84,8 @@ class OcrEngine:
             )
             arabic_only_words = words_from_tsv(arabic_only_data)
             tagged_words = merge_dual_language_passes(tagged_words, arabic_only_words)
+
+        tagged_words = correct_known_arabic_misreads(tagged_words)
 
         lines = group_into_lines(tagged_words)
         ordered_lines = order_lines_reading_order(lines)

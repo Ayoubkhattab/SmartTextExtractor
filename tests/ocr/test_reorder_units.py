@@ -16,6 +16,7 @@ from smart_text_extractor.ocr.reorder import (
     assemble_markdown,
     assemble_text,
     assemble_text_segments,
+    correct_known_arabic_misreads,
     group_into_lines,
     merge_dual_language_passes,
     order_lines_reading_order,
@@ -192,6 +193,33 @@ class TestMergeDualLanguagePasses:
         merged = merge_dual_language_passes(primary, arabic_only)
 
         assert merged[0][0].text == "Fro"
+
+
+class TestCorrectKnownArabicMisreads:
+    """Regression test for a real, confirmed-systematic misread
+    (docs/phases/phase-2-ocr-pipeline.md): "مهندس" (engineer) read as
+    "ميندس" on every single one of 7 occurrences on a real page (a
+    large role/skills table, likely small table-cell font size straining
+    the ه/ي distinction). Unlike the rejected general fuzzy-match
+    dictionary idea, "ميندس" isn't a real Arabic word with a legitimate
+    alternate meaning, so there's no ambiguity to weigh — this is a
+    narrow, hand-verified substitution, not a heuristic guess.
+    """
+
+    def test_known_misread_is_corrected(self) -> None:
+        words = [_tagged("ميندس", 39.0, Rect(0, 0, 60, 20))]
+
+        corrected = correct_known_arabic_misreads(words)
+
+        assert corrected[0][0].text == "مهندس"
+        assert corrected[0][0].confidence == 39.0  # confidence carries over unchanged
+
+    def test_unrelated_words_are_left_untouched(self) -> None:
+        words = [_tagged("مهندس", 92.0, Rect(0, 0, 60, 20)), _tagged("مرحبا", 90.0, Rect(70, 0, 60, 20))]
+
+        corrected = correct_known_arabic_misreads(words)
+
+        assert [box.text for box, *_ in corrected] == ["مهندس", "مرحبا"]
 
 
 class TestOrderLinesReadingOrderPerBlock:

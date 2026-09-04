@@ -26,28 +26,47 @@ from __future__ import annotations
 import pymupdf
 
 from smart_text_extractor.core.models import OcrResult, Page
-from smart_text_extractor.ocr.native_pdf_text import extract_native_text_result
+from smart_text_extractor.ocr.native_pdf_style import PageStyleIndex
+from smart_text_extractor.ocr.native_pdf_text import extract_native_text_result, page_layout_of
 
 
 def run_page(page: Page, engine) -> OcrResult:
     """Produces the finished OcrResult for one page. `engine` is anything
     with OcrEngine's .run(image) -> OcrResult shape."""
-    ocr_result = engine.run(str(page.image_path))
+    if page.pdf_source is None:
+        return engine.run(str(page.image_path))
 
-    if page.pdf_source is None or not page.pdf_source.text_layer_trusted:
-        return ocr_result
-
+    source = page.pdf_source
     try:
-        with pymupdf.open(str(page.pdf_source.pdf_path)) as document:
-            pdf_page = document.load_page(page.pdf_source.page_index)
-            native_result = extract_native_text_result(
-                pdf_page,
-                render_dpi=page.pdf_source.render_dpi,
-                ocr_word_boxes=ocr_result.word_boxes,
-            )
-    except Exception:  # noqa: BLE001 - the OCR result is already in hand; a missing/damaged source file must not lose it
-        return ocr_result
+        with pymupdf.open(str(source.pdf_path)) as document:
+            pdf_page = document.load_page(source.page_index)
 
-    # None means this page has no usable text layer (a scanned page inside
-    # an otherwise-digital PDF) — OCR is all there is for it.
-    return native_result if native_result is not None else ocr_result
+            # How the page LOOKS is read from the PDF even when its text is
+            # NOT trusted. The damage the trust gate screens for lives in
+            # the font's character mapping; the sizes, colours, drawn shapes
+            # and page geometry beside it are untouched and correct. So a
+            # page whose words have to come from OCR still gets its real
+            # heading sizes, its coloured boxes and its paper — instead of
+            # the flat, full-width, unstyled dump it produced before, which
+            # is exactly what a text layer failing the gate used to mean.
+            style_index = PageStyleIndex(pdf_page, source.render_dpi)
+            layout = page_layout_of(pdf_page)
+
+            ocr_result = engine.run(str(page.image_path), style_index=style_index)
+
+            if source.text_layer_trusted:
+                native_result = extract_native_text_result(
+                    pdf_page,
+                    render_dpi=source.render_dpi,
+                    ocr_word_boxes=ocr_result.word_boxes,
+                )
+                # None means this page has no usable text layer (a scanned
+                # page inside an otherwise-digital PDF) — OCR is all there
+                # is for it.
+                if native_result is not None:
+                    return native_result
+
+            ocr_result.page_layout = layout
+            return ocr_result
+    except Exception:  # noqa: BLE001 - a missing/damaged source must still yield the page's text
+        return engine.run(str(page.image_path))

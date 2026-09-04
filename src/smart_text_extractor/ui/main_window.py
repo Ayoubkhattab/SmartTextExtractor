@@ -85,11 +85,7 @@ _HEADING_COLOR = QColor("#1f5adb")
 _HEADING_FONT_POINT_SIZE = 16
 _TABLE_BORDER_COLOR = QColor("#c7ccd4")
 
-# A PDF point is 1/72in; Qt's point sizes render smaller on screen than the
-# same number does on a printed page, so document sizes are scaled up a
-# little to keep the on-screen hierarchy (24/18/14/12pt in the real file)
-# as visibly distinct as it is on paper.
-_PDF_POINT_TO_SCREEN_SCALE = 1.15
+_POINTS_PER_INCH = 72.0
 
 # Page-as-paper presentation (see MainWindow._apply_page_appearance).
 _PAGE_SURROUND_COLOR = "#e6e9ee"
@@ -140,6 +136,20 @@ def _status_label(page: Page) -> str:
     return "قيد المعالجة"
 
 
+def _dominant_highlight(segments: list[TextSegment]) -> str | None:
+    """The fill most of a cell's words sit on, or None if most sit on none.
+
+    A majority rather than the first match: a header cell can contain a
+    stray word the style index did not place inside the drawn band (a
+    number, a punctuation mark), and one such word should not decide — nor
+    prevent — the whole cell's colour.
+    """
+    fills = [segment.style.highlight for segment in segments if segment.style and segment.style.highlight]
+    if not fills or len(fills) * 2 <= len([s for s in segments if s.confidence is not None]):
+        return None
+    return max(set(fills), key=fills.count)
+
+
 def _card(title: str, content: QWidget) -> QFrame:
     """A titled panel — used for the image preview and the text editor so
     the window reads as distinct sections instead of two bare widgets
@@ -168,6 +178,16 @@ class MainWindow(QMainWindow):
         self._suppress_text_changed = False
         self._suppress_item_changed = False
         self._current_page_layout: PageLayout | None = None
+        # How many screen pixels one PDF point occupies in the panel. Set
+        # with the page geometry; font sizes are derived from the SAME
+        # number, so text keeps its real proportion of the page instead of
+        # being scaled independently of it.
+        self._page_scale = 1.0
+        # Off by default: the panel's job is to look like the source page,
+        # and on a document OCR is unsure about the review marks cover it in
+        # colour the original never had. It stays one click away for
+        # proof-reading, which is what it is actually for.
+        self._show_confidence = False
 
         self._bridge = _OcrBridge()
         self._bridge.page_done.connect(self._on_page_done)
@@ -216,6 +236,12 @@ class MainWindow(QMainWindow):
         self._retry_action.setEnabled(False)
         toolbar.addAction(self._retry_action)
 
+        self._confidence_action = QAction("إظهار مؤشر الثقة", self)
+        self._confidence_action.setCheckable(True)
+        self._confidence_action.setChecked(False)
+        self._confidence_action.toggled.connect(self._on_toggle_confidence)
+        toolbar.addAction(self._confidence_action)
+
         self._undo_reorder_action = QAction("تراجع عن الترتيب", self)
         self._undo_reorder_action.triggered.connect(self._on_undo_reorder)
         self._undo_reorder_action.setEnabled(False)
@@ -254,6 +280,8 @@ class MainWindow(QMainWindow):
             "&nbsp;ثقة منخفضة — يُفضَّل مراجعتها"
         )
         legend.setObjectName("confidenceLegend")
+        legend.setVisible(self._show_confidence)
+        self._legend = legend
 
         text_panel = QWidget()
         text_panel_layout = QVBoxLayout(text_panel)
@@ -454,6 +482,11 @@ class MainWindow(QMainWindow):
         self._page_list.addItem(item)
         self._suppress_item_changed = False
         self._current_page_layout: PageLayout | None = None
+        # How many screen pixels one PDF point occupies in the panel. Set
+        # with the page geometry; font sizes are derived from the SAME
+        # number, so text keeps its real proportion of the page instead of
+        # being scaled independently of it.
+        self._page_scale = 1.0
         index = self._page_list.count() - 1
         self._page_list.setCurrentRow(index)
 
@@ -512,6 +545,11 @@ class MainWindow(QMainWindow):
             self._page_list.addItem(self._page_list_item(page))
         self._suppress_item_changed = False
         self._current_page_layout: PageLayout | None = None
+        # How many screen pixels one PDF point occupies in the panel. Set
+        # with the page geometry; font sizes are derived from the SAME
+        # number, so text keeps its real proportion of the page instead of
+        # being scaled independently of it.
+        self._page_scale = 1.0
         if 0 <= selected_row < self._page_list.count():
             self._page_list.setCurrentRow(selected_row)
 
@@ -529,6 +567,14 @@ class MainWindow(QMainWindow):
             if page.id == page_id:
                 page.included_in_range = item.checkState() == Qt.CheckState.Checked
                 break
+
+    def _on_toggle_confidence(self, enabled: bool) -> None:
+        """Turns the proof-reading marks on or off and redraws the page."""
+        self._show_confidence = enabled
+        self._legend.setVisible(enabled)
+        row = self._page_list.currentRow()
+        if 0 <= row < len(self._document.pages):
+            self._refresh_detail_panel(self._document.pages[row])
 
     def _on_retry_page(self) -> None:
         """Re-runs a page that failed (§3.2's manual retry). Skip-and-Continue
@@ -564,6 +610,11 @@ class MainWindow(QMainWindow):
         item.setText(f"{page.image_path.name}\n{_status_label(page)}{suffix}")
         self._suppress_item_changed = False
         self._current_page_layout: PageLayout | None = None
+        # How many screen pixels one PDF point occupies in the panel. Set
+        # with the page geometry; font sizes are derived from the SAME
+        # number, so text keeps its real proportion of the page instead of
+        # being scaled independently of it.
+        self._page_scale = 1.0
         self.statusBar().showMessage(
             f"اكتملت معالجة {page.image_path.name}" if error is None else f"فشلت معالجة {page.image_path.name}"
         )
@@ -611,7 +662,7 @@ class MainWindow(QMainWindow):
 
         if style is not None:
             if style.font_size:
-                char_format.setFontPointSize(style.font_size * _PDF_POINT_TO_SCREEN_SCALE)
+                char_format.setFontPointSize(self._screen_point_size(style.font_size))
             if style.bold:
                 char_format.setFontWeight(QFont.Weight.Bold)
             if style.italic:
@@ -625,10 +676,27 @@ class MainWindow(QMainWindow):
             if style.highlight:
                 char_format.setBackground(QColor(style.highlight))
 
-        if confidence is not None and confidence < _LOW_CONFIDENCE_THRESHOLD:
+        if self._show_confidence and confidence is not None and confidence < _LOW_CONFIDENCE_THRESHOLD:
             is_very_low = confidence < _VERY_LOW_CONFIDENCE_THRESHOLD
             char_format.setBackground(_VERY_LOW_CONFIDENCE_COLOR if is_very_low else _LOW_CONFIDENCE_COLOR)
         return char_format
+
+    def _screen_point_size(self, font_size_points: float) -> float:
+        """Converts a size on the page into the Qt point size that occupies
+        the same fraction of the panel's rendering of that page.
+
+        Both halves matter. _page_scale puts the text at the same relative
+        size as the page it is drawn on — without it the page is shrunk to
+        fit while the text is not, so nothing lands inside the margins. The
+        DPI term converts pixels back into the point size Qt expects, since
+        Qt renders a point at the screen's own DPI rather than at 72.
+
+        Getting this wrong was the reason the panel did not look like an A4
+        page even with correct geometry: the page was drawn at ~0.8x while
+        the text was drawn at 1.15x.
+        """
+        pixels = font_size_points * self._page_scale
+        return pixels * _POINTS_PER_INCH / max(self.logicalDpiY(), 1)
 
     def _insert_segments(self, cursor: QTextCursor, segments: list[TextSegment], *, heading: bool = False) -> None:
         for segment in segments:
@@ -667,8 +735,18 @@ class MainWindow(QMainWindow):
         for row_index, row in enumerate(rows):
             for logical_column, cell_segments in enumerate(row):
                 visual_column = column_count - 1 - logical_column
-                cell_cursor = table.cellAt(row_index, visual_column).firstCursorPosition()
-                self._insert_segments(cell_cursor, cell_segments)
+                cell = table.cellAt(row_index, visual_column)
+                # Fill the whole cell, not just the strip behind the glyphs:
+                # a table's header band in the source is a drawn rectangle,
+                # and painting only the text's background leaves a
+                # colour-flecked row instead of the solid bar the original
+                # shows.
+                fill = _dominant_highlight(cell_segments)
+                if fill is not None:
+                    cell_format = cell.format()
+                    cell_format.setBackground(QColor(fill))
+                    cell.setFormat(cell_format)
+                self._insert_segments(cell.firstCursorPosition(), cell_segments)
         cursor.movePosition(QTextCursor.MoveOperation.End)
 
     def _apply_page_appearance(self, layout: PageLayout | None) -> None:
@@ -699,6 +777,7 @@ class MainWindow(QMainWindow):
             root_format.setBottomMargin(_DEFAULT_PAGE_MARGIN)
             document.rootFrame().setFrameFormat(root_format)
             self._text_edit.setStyleSheet("")
+            self._page_scale = 1.0
             self._text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             return
 
@@ -709,6 +788,7 @@ class MainWindow(QMainWindow):
         # scrollbar, which is exactly what a page view should never need.
         available = max(self._text_edit.viewport().width() - _PAGE_SHADOW_MARGIN * 2, 200)
         scale = min(available / layout.width_points, _MAX_PAGE_SCALE)
+        self._page_scale = scale
 
         root_format.setBackground(QColor("#ffffff"))
         root_format.setLeftMargin(layout.margin_left * scale)
@@ -826,6 +906,11 @@ class MainWindow(QMainWindow):
         self._suppress_text_changed = False
         self._suppress_item_changed = False
         self._current_page_layout: PageLayout | None = None
+        # How many screen pixels one PDF point occupies in the panel. Set
+        # with the page geometry; font sizes are derived from the SAME
+        # number, so text keeps its real proportion of the page instead of
+        # being scaled independently of it.
+        self._page_scale = 1.0
 
     def _on_text_edited(self) -> None:
         if self._suppress_text_changed:

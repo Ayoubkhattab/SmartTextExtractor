@@ -425,8 +425,11 @@ class TestSegments:
         assert assemble_text_segments([]) == []
 
 
-def _one_word_line(text: str, height: int, block_num: int) -> Line:
-    return Line(words=[BoundingBox(text, Rect(0, 0, 60, height), 90.0)], block_num=block_num, par_num=0, line_num=1)
+def _one_word_line(text: str, height: int, block_num: int, width: int = 600) -> Line:
+    """Defaults to a full-column-width line, which is what body text is.
+    A heading fixture passes a narrow width — see _HEADING_MAX_WIDTH_RATIO:
+    size alone no longer makes a heading, it also has to be short."""
+    return Line(words=[BoundingBox(text, Rect(0, 0, width, height), 90.0)], block_num=block_num, par_num=0, line_num=1)
 
 
 class TestAssembleMarkdown:
@@ -443,10 +446,10 @@ class TestAssembleMarkdown:
         """
         real_heights = [39, 74, 44, 46, 45, 29, 46, 31, 46, 60, 36, 38, 35, 38, 37, 35, 30, 43, 37, 37]
         lines = [_one_word_line(f"word{i}", h, block_num=i) for i, h in enumerate(real_heights)]
-        lines[0] = _one_word_line("مقترح", 39, block_num=0)  # the real title
-        lines[1] = _one_word_line("الإطار", 74, block_num=1)  # the real heading
-        lines[9] = _one_word_line("التواتر", 60, block_num=9)  # the real table header row
-        lines[16] = _one_word_line("Definition", 30, block_num=16)  # "Definition of Done" box label
+        lines[0] = _one_word_line("مقترح", 39, block_num=0, width=200)  # the real title
+        lines[1] = _one_word_line("الإطار", 74, block_num=1, width=250)  # the real heading
+        lines[9] = _one_word_line("التواتر", 60, block_num=9, width=200)  # the real table header row
+        lines[16] = _one_word_line("Definition", 30, block_num=16, width=200)  # "Definition of Done" box label
 
         markdown = assemble_markdown(lines)
 
@@ -592,7 +595,7 @@ class TestDocumentUnitBbox:
         body_lines = [_one_word_line(f"نص{i}", 20, block_num=1) for i in range(3)]
         heading_line = Line(
             words=[BoundingBox("عنوان", Rect(50, 200, 150, 40), 90.0)], block_num=2, par_num=0, line_num=1
-        )
+        )  # short, unlike the 600-wide body lines above
 
         units = classify_document_units([*body_lines, heading_line])
 
@@ -603,17 +606,18 @@ class TestDocumentUnitBbox:
         """A block that splits into [paragraph, heading, paragraph] must
         give each piece its own bbox — not the whole block's span,
         which would wrongly include the heading's region too."""
-        para_line_1 = Line(words=[BoundingBox("a", Rect(0, 0, 100, 20), 90.0)], block_num=1, par_num=0, line_num=1)
-        para_line_2 = Line(words=[BoundingBox("b", Rect(0, 30, 100, 20), 90.0)], block_num=1, par_num=0, line_num=2)
+        # body lines fill the column (300 wide); the heading is short (100)
+        para_line_1 = Line(words=[BoundingBox("a", Rect(0, 0, 300, 20), 90.0)], block_num=1, par_num=0, line_num=1)
+        para_line_2 = Line(words=[BoundingBox("b", Rect(0, 30, 300, 20), 90.0)], block_num=1, par_num=0, line_num=2)
         heading_line = Line(words=[BoundingBox("c", Rect(0, 60, 100, 40), 90.0)], block_num=1, par_num=0, line_num=3)
-        para_line_3 = Line(words=[BoundingBox("d", Rect(0, 110, 100, 20), 90.0)], block_num=1, par_num=0, line_num=4)
+        para_line_3 = Line(words=[BoundingBox("d", Rect(0, 110, 300, 20), 90.0)], block_num=1, par_num=0, line_num=4)
 
         units = classify_document_units([para_line_1, para_line_2, heading_line, para_line_3])
 
         assert [u.kind for u in units] == ["paragraph", "heading", "paragraph"]
-        assert units[0].bbox == Rect(0, 0, 100, 50)  # union of para_line_1 + para_line_2 only
+        assert units[0].bbox == Rect(0, 0, 300, 50)  # union of para_line_1 + para_line_2 only
         assert units[1].bbox == Rect(0, 60, 100, 40)  # the heading line alone
-        assert units[2].bbox == Rect(0, 110, 100, 20)  # para_line_3 alone
+        assert units[2].bbox == Rect(0, 110, 300, 20)  # para_line_3 alone
 
     def test_table_unit_bbox_is_the_union_of_all_its_rows(self) -> None:
         def two_cell_row(y: int, line_num: int) -> Line:

@@ -128,6 +128,7 @@ def test_low_and_very_low_confidence_words_are_highlighted_distinctly(qtbot, doc
     pool = _FakeOcrPool(result=result)
     window = MainWindow(document, pool, _FakeScannerService())
     qtbot.addWidget(window)
+    window._confidence_action.setChecked(True)  # review marks are opt-in
 
     window._add_page(sample_image)
     window._page_list.setCurrentRow(0)
@@ -238,6 +239,7 @@ def test_low_confidence_word_inside_a_heading_still_gets_highlighted(qtbot, docu
     one (see _char_format_for's docstring)."""
     units = [DocumentUnit(kind="heading", segments=[TextSegment("مشكوك", 40.0)])]
     window = _open_page_with_document_units(qtbot, document, sample_image, units)
+    window._confidence_action.setChecked(True)  # review marks are opt-in
 
     char_format = _char_format_at(window._text_edit, 0)
     assert char_format.fontWeight() == QFont.Weight.Bold  # still a heading
@@ -610,7 +612,8 @@ class TestSourcePageStyling:
     """A PDF text layer records how its text looks; the panel is supposed to
     show that rather than a uniform dump (models.TextStyle)."""
 
-    def _format(self, window, segment):
+    def _format(self, window, segment, show_confidence=False):
+        window._show_confidence = show_confidence
         return window._char_format_for(segment.confidence, style=segment.style)
 
     def test_font_size_weight_and_colour_come_from_the_source_page(self, qtbot, document) -> None:
@@ -621,8 +624,13 @@ class TestSourcePageStyling:
         style = TextStyle(font_size=24.0, bold=True, color="#333333")
 
         fmt = self._format(window, TextSegment("عنوان", 100.0, style))
+        body = self._format(window, TextSegment("نص", 100.0, TextStyle(font_size=14.0)))
 
-        assert fmt.fontPointSize() > 24.0  # scaled for screen, but driven by the real 24pt
+        # The absolute number is a screen size, not the page's 24pt — Qt
+        # renders a point at the screen's DPI, and the page itself is scaled
+        # to fit the panel. What has to hold is the proportion: the page's
+        # own size hierarchy survives intact.
+        assert fmt.fontPointSize() / body.fontPointSize() == pytest.approx(24.0 / 14.0, rel=0.01)
         assert fmt.fontWeight() == QFont.Weight.Bold
         assert fmt.foreground().color().name() == "#333333"
 
@@ -644,7 +652,7 @@ class TestSourcePageStyling:
         window = MainWindow(document, _FakeOcrPool(), _FakeScannerService())
         qtbot.addWidget(window)
 
-        fmt = self._format(window, TextSegment("نص", 30.0, TextStyle(highlight="#f7d1d5")))
+        fmt = self._format(window, TextSegment("نص", 30.0, TextStyle(highlight="#f7d1d5")), show_confidence=True)
 
         assert fmt.background().color().name() == _VERY_LOW_CONFIDENCE_COLOR.name()
 
@@ -670,3 +678,18 @@ class TestSourcePageStyling:
 
         first = window._text_edit.document().findBlockByNumber(0)
         assert first.blockFormat().alignment() == Qt.AlignmentFlag.AlignHCenter
+
+
+def test_review_marks_are_off_by_default_so_the_page_matches_its_source(qtbot, document, sample_image) -> None:
+    """The panel's job is to look like the source page. On a document OCR is
+    unsure about, the review marks cover it in colour the original never
+    had — so they are opt-in."""
+    units = [DocumentUnit(kind="paragraph", segments=[TextSegment("مشكوك", 30.0)])]
+    window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+    assert window._confidence_action.isChecked() is False
+    assert _char_format_at(window._text_edit, 0).background().color().name() != _VERY_LOW_CONFIDENCE_COLOR.name()
+
+    window._confidence_action.setChecked(True)
+
+    assert _char_format_at(window._text_edit, 0).background().color().name() == _VERY_LOW_CONFIDENCE_COLOR.name()

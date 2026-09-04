@@ -368,7 +368,48 @@ def _cluster_columns_and_order(lines: list[Line], column_gap_ratio: float, rtl_p
 
     ordered: list[Line] = []
     for col in columns:
-        ordered.extend(sorted(col, key=lambda line: line.rect.y))
+        ordered.extend(_rows_in_reading_order(col, rtl_page))
+    return ordered
+
+
+_SAME_ROW_MAX_Y_OFFSET_RATIO = 0.5
+"""How far apart two pieces' tops may be, as a fraction of line height, and
+still be the same visual row. Not zero: a row mixing font sizes puts its
+pieces at slightly different tops — on a real page a bullet marker sat
+3.7pt above the rest of its own line."""
+
+
+def _rows_in_reading_order(lines: list[Line], rtl_page: bool) -> list[Line]:
+    """Orders lines within one column: rows top to bottom, and pieces of the
+    SAME row in the page's reading direction.
+
+    Real bug this fixes (confirmed on a live page, and the direct cause of
+    Arabic coming out in the wrong order): a single visual line is often
+    delivered as several pieces — a justified line split at its gap, a
+    bullet line split around embedded Latin. Ordering a column by y alone
+    leaves those pieces in whatever order they arrived, which is
+    left-to-right, so an Arabic row reads backwards. "هذا الدليل موجّه ...
+    المستندات، سواء كانوا موظفين عاديين" came out with its left-hand piece
+    first, and a bulleted list of English terms came out fully reversed.
+
+    Sorting by (y, -x) would be enough if pieces of one row shared a y, but
+    they do not when the row mixes font sizes — hence grouping into rows by
+    a height-relative tolerance first.
+    """
+    if not lines:
+        return []
+
+    rows: list[list[Line]] = []
+    for line in sorted(lines, key=lambda item: item.rect.y):
+        tolerance = max(line.rect.height, 1) * _SAME_ROW_MAX_Y_OFFSET_RATIO
+        if rows and abs(line.rect.y - rows[-1][0].rect.y) <= tolerance:
+            rows[-1].append(line)
+        else:
+            rows.append([line])
+
+    ordered: list[Line] = []
+    for row in rows:
+        ordered.extend(sorted(row, key=lambda item: item.rect.x, reverse=rtl_page))
     return ordered
 
 
@@ -520,10 +561,30 @@ def _page_body_font_size(lines: list[Line]) -> float | None:
     return max(counts, key=lambda size: (counts[size], size))
 
 
-def _is_heading_line(line: Line, page_median_height: float, body_font_size: float | None) -> bool:
+_HEADING_MAX_WIDTH_RATIO = 0.7
+"""A heading also has to be SHORT — at most this fraction of the text
+column.
+
+Size alone is not enough, and got it wrong on a real page. That page has
+two body sizes: its prose runs at 10.9pt while its large tables run at
+9.0pt, and since the table text dominates the page by volume the "most
+common size" came out 9.0 — which made ordinary prose paragraphs, at
+1.21x that, look like headings and export as Heading 2. A paragraph wraps
+and fills the column; a heading does not. Requiring both conditions keeps
+the real heading (15pt and short) and drops the prose (10.9pt and
+full-width) without having to guess which size is "the" body."""
+
+
+def _is_heading_line(
+    line: Line, page_median_height: float, body_font_size: float | None, column_width: int = 0
+) -> bool:
     """Real font size when the document supplies one, measured ink height
     otherwise — the two thresholds are calibrated separately because they
-    measure different things (see _HEADING_FONT_SIZE_RATIO)."""
+    measure different things (see _HEADING_FONT_SIZE_RATIO) — and in both
+    cases the line must also be short (see _HEADING_MAX_WIDTH_RATIO)."""
+    if column_width > 0 and line.rect.width > column_width * _HEADING_MAX_WIDTH_RATIO:
+        return False
+
     font_size = _line_font_size(line)
     if font_size is not None and body_font_size:
         return font_size > body_font_size * _HEADING_FONT_SIZE_RATIO
@@ -633,7 +694,7 @@ def _classify_plain_block(
     paragraph_segments: list[TextSegment] = []
     paragraph_lines: list[Line] = []
     for line in block_lines:
-        if _is_heading_line(line, page_median_height, body_font_size):
+        if _is_heading_line(line, page_median_height, body_font_size, column_right - column_left):
             if paragraph_segments:
                 units.append(
                     DocumentUnit(

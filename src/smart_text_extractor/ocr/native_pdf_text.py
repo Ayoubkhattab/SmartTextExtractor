@@ -93,7 +93,7 @@ def corrupt_token_ratio(boxes: list[BoundingBox]) -> float:
     return corrupt / len(boxes)
 
 
-def _page_layout(page: pymupdf.Page) -> PageLayout:
+def page_layout_of(page: pymupdf.Page) -> PageLayout:
     """The page's real size and the margins its text actually observes.
 
     Size comes straight from the page. Margins are measured from the text
@@ -352,5 +352,5 @@ def extract_native_text_result(
         markdown=assemble_markdown(ordered_lines),
         document_units=document_units,
         confidence_score=100.0,
-        page_layout=_page_layout(page),
+        page_layout=page_layout_of(page),
     )

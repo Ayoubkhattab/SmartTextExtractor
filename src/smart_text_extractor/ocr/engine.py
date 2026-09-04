@@ -12,7 +12,7 @@ import numpy as np
 import pytesseract
 from PIL import Image
 
-from smart_text_extractor.core.models import OcrResult
+from smart_text_extractor.core.models import BoundingBox, OcrResult
 from smart_text_extractor.ocr.preprocessing import enhance_contrast, preprocess_color
 from smart_text_extractor.ocr.reorder import (
     assemble_markdown,
@@ -52,14 +52,14 @@ class OcrEngine:
         if tessdata_dir is not None:
             os.environ["TESSDATA_PREFIX"] = str(tessdata_dir)
 
-    def run(self, image: np.ndarray | Image.Image | Path | str, psm: int = 3) -> OcrResult:
+    def run(self, image: np.ndarray | Image.Image | Path | str, psm: int = 3, style_index=None) -> OcrResult:
         # §7.1 step 2 — this was previously skipped entirely: run() sent
         # the raw image straight to Tesseract, so deskew/contrast/denoise
         # existed as tested code that nothing ever actually called.
         color_preprocessed = preprocess_color(as_bgr_array(image))
-        return self.run_on_color_preprocessed(color_preprocessed, psm=psm)
+        return self.run_on_color_preprocessed(color_preprocessed, psm=psm, style_index=style_index)
 
-    def run_on_color_preprocessed(self, color_preprocessed: np.ndarray, psm: int = 3) -> OcrResult:
+    def run_on_color_preprocessed(self, color_preprocessed: np.ndarray, psm: int = 3, style_index=None) -> OcrResult:
         """The recognition half of run(), taking preprocessing.preprocess_color's
         output directly rather than a raw image — split out so the hybrid
         OCR engine (ocr/hybrid_engine.py) can run this exact Tesseract pass
@@ -99,6 +99,16 @@ class OcrEngine:
             tagged_words = merge_dual_language_passes(tagged_words, arabic_only_words)
 
         tagged_words = correct_known_arabic_misreads(tagged_words)
+
+        if style_index is not None:
+            # OCR reads the glyphs; the source file still knows how they
+            # look. Applied here, at the single point every word exists in
+            # one list, so heading detection, alignment and every renderer
+            # downstream see the real sizes and colours (ocr/page_pipeline.py).
+            tagged_words = [
+                (BoundingBox(box.text, box.rect, box.confidence, style_index.style_for(box.rect)), block, par, line)
+                for box, block, par, line in tagged_words
+            ]
 
         lines = group_into_lines(tagged_words)
         ordered_lines = order_lines_reading_order(lines)

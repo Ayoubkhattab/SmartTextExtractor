@@ -56,6 +56,7 @@ from smart_text_extractor.core.pdf_import import (
     render_pdf_to_images,
 )
 from smart_text_extractor.export.docx_export import PageContent, export_docx
+from smart_text_extractor.export.pdf_export import SearchablePage, export_searchable_pdf
 from smart_text_extractor.scanner.service import ScannerService
 
 _TEXT_COLOR = "#1a1d21"
@@ -188,6 +189,10 @@ class MainWindow(QMainWindow):
         export_markdown_action = QAction("تصدير كـ Markdown...", self)
         export_markdown_action.triggered.connect(self._on_export_markdown)
         toolbar.addAction(export_markdown_action)
+
+        export_pdf_action = QAction("تصدير PDF قابل للبحث...", self)
+        export_pdf_action.triggered.connect(self._on_export_searchable_pdf)
+        toolbar.addAction(export_pdf_action)
 
         toolbar.addSeparator()
 
@@ -378,6 +383,40 @@ class MainWindow(QMainWindow):
 
         try:
             export_docx(pages, path)
+        except OSError as exc:
+            QMessageBox.warning(self, "تعذّر الحفظ", f"تعذّر حفظ الملف:\n{exc}")
+            return
+
+        self.statusBar().showMessage(f"تم تصدير {len(exportable_pages)} صفحة إلى {path.name}")
+
+    def _on_export_searchable_pdf(self) -> None:
+        exportable_pages = self._exportable_pages()
+        if not exportable_pages:
+            QMessageBox.information(self, "لا يوجد نص لتصديره", "لا توجد صفحات مكتملة المعالجة لتصديرها.")
+            return
+
+        path_str, _ = QFileDialog.getSaveFileName(self, "تصدير PDF قابل للبحث", "", "ملفات PDF (*.pdf)")
+        if not path_str:
+            return
+        path = Path(path_str)
+        if path.suffix.lower() != ".pdf":
+            path = path.with_suffix(".pdf")
+
+        # word_boxes, not edited_text: this export's whole point is text
+        # positioned over the matching pixels, and an edited string has no
+        # positions left. A page the user edited still exports its image
+        # and its original word positions.
+        pages = [
+            SearchablePage(
+                image_path=page.image_path,
+                word_boxes=page.ocr_result.word_boxes,
+                dpi=page.dpi or (page.pdf_source.render_dpi if page.pdf_source else None),
+            )
+            for page in exportable_pages
+        ]
+
+        try:
+            export_searchable_pdf(pages, path)
         except OSError as exc:
             QMessageBox.warning(self, "تعذّر الحفظ", f"تعذّر حفظ الملف:\n{exc}")
             return

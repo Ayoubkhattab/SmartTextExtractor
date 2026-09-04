@@ -34,6 +34,7 @@ from __future__ import annotations
 import pymupdf
 
 from smart_text_extractor.core.models import BoundingBox, OcrResult, Rect
+from smart_text_extractor.ocr.native_pdf_style import PageStyleIndex
 from smart_text_extractor.ocr.native_text_repair import find_orphan_ocr_words, repair_native_words
 from smart_text_extractor.ocr.reorder import (
     _is_majority_arabic,
@@ -173,7 +174,7 @@ def _merge_mark_initial_fragments(boxes: list[BoundingBox]) -> list[BoundingBox]
             continue
         stripped = box.text.lstrip("".join(_COMBINING_MARKS))
         if stripped:
-            cleaned.append(BoundingBox(text=stripped, rect=box.rect, confidence=box.confidence))
+            cleaned.append(BoundingBox(text=stripped, rect=box.rect, confidence=box.confidence, style=box.style))
     return cleaned
 
 
@@ -217,24 +218,31 @@ def extract_native_text_result(
         return None
 
     points_to_pixels = render_dpi / 72
-    tagged = [
-        (
-            BoundingBox(
-                text=text,
-                rect=Rect(
-                    x=round(x0 * points_to_pixels),
-                    y=round(y0 * points_to_pixels),
-                    width=round((x1 - x0) * points_to_pixels),
-                    height=round((y1 - y0) * points_to_pixels),
-                ),
-                confidence=100.0,  # not a recognition guess — this is the document's own real text
-            ),
-            block_no,
-            0,
-            line_no,
+    # How each word LOOKS — size, weight, colour, and any shape drawn
+    # behind it. Only a text layer carries this at all (ocr/native_pdf_style.py).
+    style_index = PageStyleIndex(page, render_dpi)
+
+    tagged = []
+    for x0, y0, x1, y1, text, block_no, line_no, _word_no in words:
+        rect = Rect(
+            x=round(x0 * points_to_pixels),
+            y=round(y0 * points_to_pixels),
+            width=round((x1 - x0) * points_to_pixels),
+            height=round((y1 - y0) * points_to_pixels),
         )
-        for x0, y0, x1, y1, text, block_no, line_no, word_no in words
-    ]
+        tagged.append(
+            (
+                BoundingBox(
+                    text=text,
+                    rect=rect,
+                    confidence=100.0,  # not a recognition guess — this is the document's own real text
+                    style=style_index.style_for(rect),
+                ),
+                block_no,
+                0,
+                line_no,
+            )
+        )
 
     # Reading order first, before anything downstream consumes the order
     # (repair alignment is positional so it is unaffected, but line/segment

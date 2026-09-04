@@ -604,3 +604,69 @@ class TestPageManagementWiring:
         window._on_retry_page()
 
         assert len(pool.submitted_pages) == submitted_before + 1
+
+
+class TestSourcePageStyling:
+    """A PDF text layer records how its text looks; the panel is supposed to
+    show that rather than a uniform dump (models.TextStyle)."""
+
+    def _format(self, window, segment):
+        return window._char_format_for(segment.confidence, style=segment.style)
+
+    def test_font_size_weight_and_colour_come_from_the_source_page(self, qtbot, document) -> None:
+        from smart_text_extractor.core.models import TextStyle
+
+        window = MainWindow(document, _FakeOcrPool(), _FakeScannerService())
+        qtbot.addWidget(window)
+        style = TextStyle(font_size=24.0, bold=True, color="#333333")
+
+        fmt = self._format(window, TextSegment("عنوان", 100.0, style))
+
+        assert fmt.fontPointSize() > 24.0  # scaled for screen, but driven by the real 24pt
+        assert fmt.fontWeight() == QFont.Weight.Bold
+        assert fmt.foreground().color().name() == "#333333"
+
+    def test_a_highlighted_line_keeps_its_page_colour(self, qtbot, document) -> None:
+        from smart_text_extractor.core.models import TextStyle
+
+        window = MainWindow(document, _FakeOcrPool(), _FakeScannerService())
+        qtbot.addWidget(window)
+
+        fmt = self._format(window, TextSegment("نص", 100.0, TextStyle(highlight="#f7d1d5")))
+
+        assert fmt.background().color().name() == "#f7d1d5"
+
+    def test_low_confidence_still_wins_over_the_pages_own_highlight(self, qtbot, document) -> None:
+        """Confidence highlighting is a review aid — an uncertain word has to
+        stay visible as one even inside a highlighted line."""
+        from smart_text_extractor.core.models import TextStyle
+
+        window = MainWindow(document, _FakeOcrPool(), _FakeScannerService())
+        qtbot.addWidget(window)
+
+        fmt = self._format(window, TextSegment("نص", 30.0, TextStyle(highlight="#f7d1d5")))
+
+        assert fmt.background().color().name() == _VERY_LOW_CONFIDENCE_COLOR.name()
+
+    def test_an_ocr_segment_without_styling_is_unaffected(self, qtbot, document) -> None:
+        window = MainWindow(document, _FakeOcrPool(), _FakeScannerService())
+        qtbot.addWidget(window)
+
+        fmt = self._format(window, TextSegment("word", 95.0, None))
+
+        assert fmt.fontPointSize() == 0  # nothing imposed; the widget's own size applies
+
+    def test_a_centred_unit_is_centred_in_the_panel(self, qtbot, document) -> None:
+        from smart_text_extractor.core.models import DocumentUnit
+
+        window = MainWindow(document, _FakeOcrPool(), _FakeScannerService())
+        qtbot.addWidget(window)
+        units = [
+            DocumentUnit(kind="heading", segments=[TextSegment("عنوان", 100.0)], alignment="center"),
+            DocumentUnit(kind="paragraph", segments=[TextSegment("نص", 100.0)], alignment="natural"),
+        ]
+
+        window._render_document_units(units)
+
+        first = window._text_edit.document().findBlockByNumber(0)
+        assert first.blockFormat().alignment() == Qt.AlignmentFlag.AlignHCenter

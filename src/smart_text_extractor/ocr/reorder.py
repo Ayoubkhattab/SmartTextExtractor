@@ -295,7 +295,7 @@ def _line_cell_segments(
     """
     words = line.words
     if len(words) <= 1:
-        return [[TextSegment(w.text, w.confidence) for w in words]]
+        return [[TextSegment(w.text, w.confidence, w.style) for w in words]]
 
     gaps = [
         max(a.rect.x, b.rect.x) - min(a.rect.x + a.rect.width, b.rect.x + b.rect.width)
@@ -303,13 +303,13 @@ def _line_cell_segments(
     ]
     gap_threshold = max(min(gaps) * gap_multiplier, min_gap_threshold)
 
-    cells: list[list[TextSegment]] = [[TextSegment(words[0].text, words[0].confidence)]]
+    cells: list[list[TextSegment]] = [[TextSegment(words[0].text, words[0].confidence, words[0].style)]]
     for word, gap in zip(words[1:], gaps):
         if gap > gap_threshold:
             cells.append([])
         else:
             cells[-1].append(TextSegment(" ", None))
-        cells[-1].append(TextSegment(word.text, word.confidence))
+        cells[-1].append(TextSegment(word.text, word.confidence, word.style))
     return cells
 
 
@@ -486,6 +486,50 @@ def _line_median_height(line: Line) -> float:
     return _median([word.rect.height for word in line.words])
 
 
+_HEADING_FONT_SIZE_RATIO = 1.2
+"""How much larger than the page's body text a line's REAL font size has to
+be to count as a heading.
+
+This is a much lower bar than _HEADING_HEIGHT_RATIO because it compares a
+completely different, far cleaner signal. That constant compares measured
+ink height, where an ascender or a diacritic can swing a line's apparent
+size and the two clusters (heading vs table header) sit close enough
+together that only a conservative 1.75 separates them safely. A PDF's own
+font size has no such noise: measured on a real document the body is 14pt
+and the headings are 18pt and 24pt, a 1.29x step that the height-based
+rule missed entirely — both headings were coming through as ordinary
+paragraphs."""
+
+
+def _line_font_size(line: Line) -> float | None:
+    """The line's own font size, when the source recorded one (a PDF text
+    layer does; OCR cannot)."""
+    sizes = [word.style.font_size for word in line.words if word.style and word.style.font_size]
+    return _median(sizes) if sizes else None
+
+
+def _page_body_font_size(lines: list[Line]) -> float | None:
+    """The most common font size on the page — its body text, whatever that
+    happens to be, rather than an assumed point size."""
+    sizes = [word.style.font_size for line in lines for word in line.words if word.style and word.style.font_size]
+    if not sizes:
+        return None
+    counts: dict[float, int] = {}
+    for size in sizes:
+        counts[size] = counts.get(size, 0) + 1
+    return max(counts, key=lambda size: (counts[size], size))
+
+
+def _is_heading_line(line: Line, page_median_height: float, body_font_size: float | None) -> bool:
+    """Real font size when the document supplies one, measured ink height
+    otherwise — the two thresholds are calibrated separately because they
+    measure different things (see _HEADING_FONT_SIZE_RATIO)."""
+    font_size = _line_font_size(line)
+    if font_size is not None and body_font_size:
+        return font_size > body_font_size * _HEADING_FONT_SIZE_RATIO
+    return _line_median_height(line) > page_median_height * _HEADING_HEIGHT_RATIO
+
+
 def _line_cells(line: Line, gap_multiplier: float = 4.0, min_gap_threshold: float = 40.0) -> list[str]:
     """Splits one line into per-cell strings using the same gap-based
     boundary detection as _line_segments_with_cell_separators — a line
@@ -533,7 +577,48 @@ def _rows_to_markdown_table(rows: list[list[list[TextSegment]]]) -> str:
     return "\n".join(table_lines)
 
 
-def _classify_plain_block(block_lines: list[Line], page_median_height: float) -> list[DocumentUnit]:
+_CENTERED_MAX_WIDTH_RATIO = 0.85
+"""A centred line has to be narrower than the text column — a full-width
+line is simply justified, whatever its margins happen to measure."""
+
+_CENTERED_MAX_MARGIN_DIFFERENCE = 0.12
+"""How different the two margins may be, as a fraction of the column width,
+for a line to still count as centred rather than merely indented."""
+
+
+def _alignment_of(lines: list[Line], column_left: int, column_right: int) -> str:
+    """Whether these lines sit centred in the page's text column.
+
+    Measured from position rather than guessed from role: a document's
+    title is usually centred and its body is not, but so is a centred
+    pull-quote, and a short heading that happens to be left-aligned is not
+    centred just because it is short. Both margins have to be substantial
+    and roughly equal.
+    """
+    column_width = column_right - column_left
+    if column_width <= 0:
+        return "natural"
+
+    for line in lines:
+        rect = line.rect
+        if rect.width > column_width * _CENTERED_MAX_WIDTH_RATIO:
+            return "natural"
+        left_margin = rect.x - column_left
+        right_margin = column_right - (rect.x + rect.width)
+        if min(left_margin, right_margin) <= 0:
+            return "natural"
+        if abs(left_margin - right_margin) > column_width * _CENTERED_MAX_MARGIN_DIFFERENCE:
+            return "natural"
+    return "center"
+
+
+def _classify_plain_block(
+    block_lines: list[Line],
+    page_median_height: float,
+    column_left: int = 0,
+    column_right: int = 0,
+    body_font_size: float | None = None,
+) -> list[DocumentUnit]:
     """Classifies one non-tabular block into one or more units:
     consecutive body-height lines join into a single "paragraph" unit
     (newline-separated, matching assemble_text), but a heading-height
@@ -548,14 +633,26 @@ def _classify_plain_block(block_lines: list[Line], page_median_height: float) ->
     paragraph_segments: list[TextSegment] = []
     paragraph_lines: list[Line] = []
     for line in block_lines:
-        if _line_median_height(line) > page_median_height * _HEADING_HEIGHT_RATIO:
+        if _is_heading_line(line, page_median_height, body_font_size):
             if paragraph_segments:
                 units.append(
-                    DocumentUnit(kind="paragraph", segments=paragraph_segments, bbox=_union_rect([l.rect for l in paragraph_lines]))
+                    DocumentUnit(
+                        kind="paragraph",
+                        segments=paragraph_segments,
+                        bbox=_union_rect([l.rect for l in paragraph_lines]),
+                        alignment=_alignment_of(paragraph_lines, column_left, column_right),
+                    )
                 )
                 paragraph_segments = []
                 paragraph_lines = []
-            units.append(DocumentUnit(kind="heading", segments=_line_segments_with_cell_separators(line), bbox=line.rect))
+            units.append(
+                DocumentUnit(
+                    kind="heading",
+                    segments=_line_segments_with_cell_separators(line),
+                    bbox=line.rect,
+                    alignment=_alignment_of([line], column_left, column_right),
+                )
+            )
         else:
             if paragraph_segments:
                 paragraph_segments.append(TextSegment("\n", None))
@@ -563,7 +660,12 @@ def _classify_plain_block(block_lines: list[Line], page_median_height: float) ->
             paragraph_lines.append(line)
     if paragraph_segments:
         units.append(
-            DocumentUnit(kind="paragraph", segments=paragraph_segments, bbox=_union_rect([l.rect for l in paragraph_lines]))
+            DocumentUnit(
+                kind="paragraph",
+                segments=paragraph_segments,
+                bbox=_union_rect([l.rect for l in paragraph_lines]),
+                alignment=_alignment_of(paragraph_lines, column_left, column_right),
+            )
         )
     return units
 
@@ -585,6 +687,12 @@ def classify_document_units(lines: list[Line]) -> list[DocumentUnit]:
         return []
 
     page_median_height = _median([word.rect.height for line in lines for word in line.words])
+    # The page's text column, measured from the text itself — alignment is
+    # relative to where this document actually puts its text, not to the
+    # paper size, so it holds for any margin setup.
+    column_left = min(line.rect.x for line in lines)
+    column_right = max(line.rect.x + line.rect.width for line in lines)
+    body_font_size = _page_body_font_size(lines)
 
     blocks: list[list[Line]] = [[]]
     current_block_num = lines[0].block_num
@@ -620,7 +728,9 @@ def classify_document_units(lines: list[Line]) -> list[DocumentUnit]:
             bbox = _union_rect([line.rect for line in block_lines])
             units.append(DocumentUnit(kind="table", rows=[_line_cell_segments(line) for line in block_lines], bbox=bbox))
         else:
-            units.extend(_classify_plain_block(block_lines, page_median_height))
+            units.extend(
+                _classify_plain_block(block_lines, page_median_height, column_left, column_right, body_font_size)
+            )
         i += 1
 
     return units

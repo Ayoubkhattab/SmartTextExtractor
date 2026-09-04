@@ -49,6 +49,7 @@ from smart_text_extractor.core.models import (
     PageLockedError,
     PdfPageSource,
     TextSegment,
+    TextStyle,
 )
 from smart_text_extractor.core.pdf_import import (
     DEFAULT_RENDER_DPI,
@@ -82,6 +83,12 @@ _VERY_LOW_CONFIDENCE_COLOR = QColor("#f8c9c9")
 _HEADING_COLOR = QColor("#1f5adb")
 _HEADING_FONT_POINT_SIZE = 16
 _TABLE_BORDER_COLOR = QColor("#c7ccd4")
+
+# A PDF point is 1/72in; Qt's point sizes render smaller on screen than the
+# same number does on a printed page, so document sizes are scaled up a
+# little to keep the on-screen hierarchy (24/18/14/12pt in the real file)
+# as visibly distinct as it is on paper.
+_PDF_POINT_TO_SCREEN_SCALE = 1.15
 
 _STYLESHEET = f"""
 QMainWindow, QWidget {{ background-color: #f4f5f7; color: {_TEXT_COLOR}; font-family: "Segoe UI", "Tahoma", sans-serif; font-size: 13px; }}
@@ -555,18 +562,52 @@ class MainWindow(QMainWindow):
         self._retry_action.setEnabled(page.ocr_status == OcrStatus.FAILED)
         self._refresh_detail_panel(page)
 
-    def _char_format_for(self, confidence: float | None, *, heading: bool = False) -> QTextCharFormat:
-        """The one place confidence-highlighting is decided, shared by
-        every renderer below — a table cell or a heading is not
-        automatically trustworthy just because it was recognized as one,
-        so the same yellow/red signal _render_segments always gave
-        applies here too, layered under the heading's own bold/blue
-        styling rather than replaced by it."""
+    def _char_format_for(
+        self, confidence: float | None, *, heading: bool = False, style: TextStyle | None = None
+    ) -> QTextCharFormat:
+        """The one place a segment's appearance is decided, shared by every
+        renderer below.
+
+        Three layers, applied in order so each can override the last:
+
+        1. The heading fallback (bold, blue, fixed size) — used when the
+           source gave us no real styling to work from, i.e. OCR pages,
+           where size is inferred from measured word height.
+        2. The page's OWN style when the source carried one (TextStyle, only
+           available from a PDF text layer): real font size, weight, colour,
+           and the fill of any shape drawn behind the text. This is what
+           makes the panel look like the document instead of like a
+           uniform text dump, and it overrides the fallback above — the
+           heading blue is a stand-in for not knowing the real colour.
+        3. Confidence highlighting, last and deliberately winning over the
+           page's own background: it is a review aid, and a word the engine
+           is unsure of has to stay visible as such even inside a
+           highlighted line. Native text is confidence 100, so in practice
+           the two never compete on the same word.
+        """
         char_format = QTextCharFormat()
+
         if heading:
             char_format.setFontWeight(QFont.Weight.Bold)
             char_format.setFontPointSize(_HEADING_FONT_POINT_SIZE)
             char_format.setForeground(_HEADING_COLOR)
+
+        if style is not None:
+            if style.font_size:
+                char_format.setFontPointSize(style.font_size * _PDF_POINT_TO_SCREEN_SCALE)
+            if style.bold:
+                char_format.setFontWeight(QFont.Weight.Bold)
+            if style.italic:
+                char_format.setFontItalic(True)
+            if style.color:
+                # The document's own colour wins over the heading blue: that
+                # blue exists only as a stand-in for OCR pages, where no
+                # colour is recoverable at all. Where the real one is known,
+                # showing it is the whole point.
+                char_format.setForeground(QColor(style.color))
+            if style.highlight:
+                char_format.setBackground(QColor(style.highlight))
+
         if confidence is not None and confidence < _LOW_CONFIDENCE_THRESHOLD:
             is_very_low = confidence < _VERY_LOW_CONFIDENCE_THRESHOLD
             char_format.setBackground(_VERY_LOW_CONFIDENCE_COLOR if is_very_low else _LOW_CONFIDENCE_COLOR)
@@ -574,7 +615,9 @@ class MainWindow(QMainWindow):
 
     def _insert_segments(self, cursor: QTextCursor, segments: list[TextSegment], *, heading: bool = False) -> None:
         for segment in segments:
-            cursor.insertText(segment.text, self._char_format_for(segment.confidence, heading=heading))
+            cursor.insertText(
+                segment.text, self._char_format_for(segment.confidence, heading=heading, style=segment.style)
+            )
 
     def _render_segments(self, segments: list[TextSegment]) -> None:
         """Paints a flat OcrResult.segments list into the text editor —
@@ -624,12 +667,25 @@ class MainWindow(QMainWindow):
         for index, unit in enumerate(units):
             if index > 0:
                 cursor.insertBlock()
+            self._apply_alignment(cursor, unit.alignment)
             if unit.kind == "heading":
                 self._insert_segments(cursor, unit.segments, heading=True)
             elif unit.kind == "table":
                 self._insert_table(cursor, unit.rows)
             else:
                 self._insert_segments(cursor, unit.segments)
+
+    @staticmethod
+    def _apply_alignment(cursor: QTextCursor, alignment: str) -> None:
+        """A unit measured as centred on the page is centred here too; every
+        other unit keeps the text's own direction, which for this RTL-first
+        window means right-aligned Arabic and left-aligned Latin without
+        either being forced."""
+        block_format = cursor.blockFormat()
+        block_format.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter if alignment == "center" else Qt.AlignmentFlag.AlignAbsolute
+        )
+        cursor.setBlockFormat(block_format)
 
     def _refresh_detail_panel(self, page: Page) -> None:
         pixmap = QPixmap(str(page.image_path))

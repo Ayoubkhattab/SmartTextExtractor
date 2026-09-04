@@ -158,7 +158,12 @@ def repair_native_words(native_boxes: list[BoundingBox], ocr_boxes: list[Boundin
 
         if best_match is not None and is_transposition(native_box.text, best_match.text):
             repaired.append(
-                BoundingBox(text=best_match.text, rect=native_box.rect, confidence=native_box.confidence)
+                BoundingBox(
+                    text=best_match.text,
+                    rect=native_box.rect,
+                    confidence=native_box.confidence,
+                    style=native_box.style,  # OCR supplies the letters; how the word LOOKS still comes from the PDF
+                )
             )
             replacements.append((native_box.text, best_match.text))
         else:

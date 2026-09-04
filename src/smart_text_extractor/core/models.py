@@ -40,6 +40,27 @@ class Rect:
 
 
 @dataclass(frozen=True)
+class TextStyle:
+    """How a piece of text actually looks on the page (§7.1.1 extension).
+
+    Only a PDF's own text layer carries this — font size, weight and colour
+    are recorded in the file. OCR cannot recover any of it from pixels, so
+    every field is optional and an OCR-produced segment simply has none;
+    renderers fall back to their existing size/heading heuristics there.
+
+    highlight is not a font property: it is the fill colour of a drawn
+    rectangle sitting behind the text (a highlighted line, a coloured
+    callout box), matched to the text by position.
+    """
+
+    font_size: float | None = None  # points, as stored in the PDF
+    bold: bool = False
+    italic: bool = False
+    color: str | None = None  # "#rrggbb"
+    highlight: str | None = None  # "#rrggbb" of the shape behind the text
+
+
+@dataclass(frozen=True)
 class BoundingBox:
     """One recognized word and its position on the source image (§7.3).
 
@@ -51,6 +72,7 @@ class BoundingBox:
     text: str
     rect: Rect
     confidence: float
+    style: TextStyle | None = None  # only a PDF text layer supplies this; None for OCR words
 
 
 @dataclass(frozen=True)
@@ -69,6 +91,7 @@ class TextSegment:
 
     text: str
     confidence: float | None
+    style: TextStyle | None = None  # carried through from the source word, so renderers can match the page's look
 
 
 @dataclass
@@ -97,6 +120,7 @@ class DocumentUnit:
     segments: list[TextSegment] = field(default_factory=list)  # heading/paragraph content; unused for kind == "table"
     rows: list[list[list[TextSegment]]] = field(default_factory=list)  # table cell rows (each cell its own segment list); unused outside kind == "table"
     bbox: Rect | None = None  # union of this unit's source words' positions on the page image (pixels, same space as OcrResult.word_boxes) — lets the hybrid OCR engine (ocr/hybrid_engine.py) crop exactly this region for a second pass; None only for a unit built without positional data (e.g. constructed directly by a test)
+    alignment: str = "natural"  # "natural" (follow the text's own direction) | "center" — measured from where the unit actually sits in the page's text column, so a centred title stays centred in the output
 
 
 @dataclass

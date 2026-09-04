@@ -11,6 +11,7 @@ from pathlib import Path
 
 import docx
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Pt, RGBColor
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
@@ -57,6 +58,45 @@ def _segments_to_text(segments: list[TextSegment]) -> str:
     return "".join(segment.text for segment in segments)
 
 
+def _add_styled_runs(paragraph: Paragraph, segments: list[TextSegment]) -> None:
+    """Writes the segments as Word runs that keep the source page's own
+    look — real font size, weight and colour — instead of flattening
+    everything to the default body style.
+
+    Only a PDF text layer records any of that (models.TextStyle); an OCR
+    page's segments carry none and come out as plain runs exactly as
+    before. Consecutive segments sharing a style are written as ONE run,
+    so a normal paragraph stays a single run rather than one per word.
+    """
+    if not segments:
+        return
+
+    current_style = segments[0].style
+    buffer: list[str] = []
+
+    def flush() -> None:
+        if not buffer:
+            return
+        run = paragraph.add_run("".join(buffer))
+        if current_style is not None:
+            if current_style.font_size:
+                run.font.size = Pt(current_style.font_size)
+            if current_style.bold:
+                run.bold = True
+            if current_style.italic:
+                run.italic = True
+            if current_style.color:
+                run.font.color.rgb = RGBColor.from_string(current_style.color.lstrip("#").upper())
+
+    for segment in segments:
+        if segment.style != current_style:
+            flush()
+            buffer = []
+            current_style = segment.style
+        buffer.append(segment.text)
+    flush()
+
+
 def _add_table(document: docx.document.Document, rows: list[list[list[TextSegment]]]) -> None:
     if not rows:
         return
@@ -74,12 +114,19 @@ def _add_table(document: docx.document.Document, rows: list[list[list[TextSegmen
 
 def _add_units(document: docx.document.Document, units: list[DocumentUnit]) -> None:
     for unit in units:
-        if unit.kind == "heading":
-            _set_rtl(document.add_heading(_segments_to_text(unit.segments), level=2))
-        elif unit.kind == "table":
+        if unit.kind == "table":
             _add_table(document, unit.rows)
-        else:
-            _set_rtl(document.add_paragraph(_segments_to_text(unit.segments)))
+            continue
+
+        # add_heading()/add_paragraph() with no text, then styled runs: the
+        # heading STYLE still marks it as a heading for Word's navigation
+        # and table of contents, while the runs carry the source page's own
+        # size/weight/colour on top of it.
+        paragraph = document.add_heading("", level=2) if unit.kind == "heading" else document.add_paragraph()
+        _set_rtl(paragraph)
+        if unit.alignment == "center":
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _add_styled_runs(paragraph, unit.segments)
 
 
 def _add_plain_text(document: docx.document.Document, text: str) -> None:

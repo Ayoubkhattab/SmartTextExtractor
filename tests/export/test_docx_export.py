@@ -88,3 +88,72 @@ def test_export_docx_writes_a_file_that_reopens_with_the_same_content(tmp_path: 
     assert path.exists()
     reopened = docx.Document(str(path))
     assert any(p.text == "نص للتحقق" for p in reopened.paragraphs)
+
+
+class TestSourcePageStylingInWord:
+    """The Word export should look like the page it came from, not like the
+    default body style — real font size, weight, colour and centring."""
+
+    def _paragraph(self, units):
+        return build_docx([units]).paragraphs
+
+    def test_font_size_and_weight_reach_the_word_run(self) -> None:
+        from docx.shared import Pt
+
+        from smart_text_extractor.core.models import TextStyle
+
+        units = [
+            DocumentUnit(
+                kind="heading",
+                segments=[TextSegment("عنوان", 100.0, TextStyle(font_size=24.0, bold=True))],
+            )
+        ]
+
+        run = self._paragraph(units)[0].runs[0]
+
+        assert run.font.size == Pt(24.0)
+        assert run.bold is True
+
+    def test_text_colour_reaches_the_word_run(self) -> None:
+        from docx.shared import RGBColor
+
+        from smart_text_extractor.core.models import TextStyle
+
+        units = [DocumentUnit(kind="paragraph", segments=[TextSegment("نص", 100.0, TextStyle(color="#333333"))])]
+
+        assert self._paragraph(units)[0].runs[0].font.color.rgb == RGBColor.from_string("333333")
+
+    def test_a_centred_unit_is_centred_in_word(self) -> None:
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        units = [DocumentUnit(kind="heading", segments=[TextSegment("عنوان", 100.0)], alignment="center")]
+
+        assert self._paragraph(units)[0].alignment == WD_ALIGN_PARAGRAPH.CENTER
+
+    def test_a_heading_keeps_its_word_heading_style(self) -> None:
+        """The style is what puts it in Word's navigation pane; the run
+        formatting sits on top of it rather than replacing it."""
+        units = [DocumentUnit(kind="heading", segments=[TextSegment("عنوان", 100.0)])]
+
+        assert self._paragraph(units)[0].style.name.startswith("Heading")
+
+    def test_consecutive_segments_sharing_a_style_become_one_run(self) -> None:
+        from smart_text_extractor.core.models import TextStyle
+
+        style = TextStyle(font_size=14.0)
+        units = [
+            DocumentUnit(
+                kind="paragraph",
+                segments=[TextSegment("كلمة", 100.0, style), TextSegment(" ", None, style), TextSegment("أخرى", 100.0, style)],
+            )
+        ]
+
+        runs = self._paragraph(units)[0].runs
+
+        assert len(runs) == 1
+        assert runs[0].text == "كلمة أخرى"
+
+    def test_unstyled_ocr_segments_still_export(self) -> None:
+        units = [DocumentUnit(kind="paragraph", segments=[TextSegment("plain", 90.0)])]
+
+        assert self._paragraph(units)[0].text == "plain"

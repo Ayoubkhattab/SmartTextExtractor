@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 
 from smart_text_extractor.concurrency.ocr_worker_pool import OcrWorkerPool
 from smart_text_extractor.core.models import Document, OcrResult, OcrStatus, Page, TextSegment
-from smart_text_extractor.core.pdf_import import import_pdf_pages
+from smart_text_extractor.core.pdf_import import render_pdf_to_images
 from smart_text_extractor.export.docx_export import PageContent, export_docx
 from smart_text_extractor.scanner.service import ScannerService
 
@@ -213,12 +213,12 @@ class MainWindow(QMainWindow):
     def _open_file(self, path: Path) -> None:
         if path.suffix.lower() == ".pdf":
             try:
-                page_imports = import_pdf_pages(path, self._document.temp_dir_path)
+                image_paths = render_pdf_to_images(path, self._document.temp_dir_path)
             except Exception as exc:  # noqa: BLE001 - surfaced to the user, not a crash
                 QMessageBox.warning(self, "تعذّرت قراءة الملف", f"تعذّر فتح {path.name}:\n{exc}")
                 return
-            for page_import in page_imports:
-                self._add_page(page_import.image_path, page_import.native_result)
+            for image_path in image_paths:
+                self._add_page(image_path)
         else:
             self._add_page(path)
 

@@ -308,16 +308,53 @@ def test_opening_a_multi_page_pdf_adds_one_page_per_pdf_page(qtbot, document, tm
     assert len(pool.submitted_pages) == 3
 
 
-def test_opening_a_pdf_page_with_a_native_text_layer_skips_ocr_entirely(qtbot, document, tmp_path: Path) -> None:
-    """A PDF page with a real, substantial embedded text layer (§7.1
-    extension) is DONE immediately from that text — it never reaches the
-    OCR pool at all, since there's no recognition step needed or run."""
+def test_add_page_with_a_native_result_skips_ocr_entirely(qtbot, document, sample_image) -> None:
+    """_add_page's native_result path (§7.1 extension) is DONE
+    immediately from that text, never reaching the OCR pool — the
+    underlying mechanism, kept and tested even though _open_file no
+    longer wires it in automatically for PDFs.
+
+    REAL-WORLD REGRESSION (docs/phases/phase-2-ocr-pipeline.md): this
+    used to be wired into _open_file via import_pdf_pages for every PDF.
+    Reverted after live testing on a real user document: PyMuPDF's own
+    text extraction (page.get_text) came back character-corrupted for
+    specific letter sequences on that PDF (e.g. "الافتراضية" -> "الفرتاضية")
+    — confirmed via a direct OCR comparison on the same real page that
+    Tesseract read those exact words correctly where the embedded text
+    layer did not, i.e. the PDF's own font encoding is broken for that
+    document, not something our extraction code causes or can detect
+    reliably yet. OCR is the safe default until there's a validated way
+    to tell a trustworthy embedded text layer from a corrupted one.
+    """
+    native_result = OcrResult(raw_text="word0 word1", confidence_score=100.0)
+    pool = _FakeOcrPool()
+    window = MainWindow(document, pool, _FakeScannerService())
+    qtbot.addWidget(window)
+
+    window._add_page(sample_image, native_result)
+
+    assert len(document.pages) == 1
+    assert pool.submitted_pages == []  # never went through OCR
+    assert document.pages[0].ocr_status is OcrStatus.DONE
+    assert document.pages[0].ocr_result.confidence_score == 100.0
+    assert "word0" in document.pages[0].ocr_result.raw_text
+    assert "نص أصلي" in window._page_list.item(0).text()
+
+
+def test_opening_a_pdf_always_goes_through_ocr_even_with_a_native_text_layer(
+    qtbot, document, tmp_path: Path
+) -> None:
+    """_open_file does not use import_pdf_pages/native extraction — see
+    test_add_page_with_a_native_result_skips_ocr_entirely's docstring for
+    why this was reverted. Every PDF page, regardless of its own embedded
+    text, goes through the OCR pool exactly as an image-only page would.
+    """
     import pymupdf
 
     pdf_path = tmp_path / "doc.pdf"
     doc = pymupdf.open()
     page = doc.new_page(width=600, height=400)
-    text = " ".join(f"word{i}" for i in range(20))  # well over MIN_WORDS_FOR_NATIVE_TEXT
+    text = " ".join(f"word{i}" for i in range(20))  # well over the native-text word threshold
     page.insert_textbox(pymupdf.Rect(20, 20, 580, 380), text, fontsize=14)
     doc.save(str(pdf_path))
     doc.close()
@@ -329,11 +366,7 @@ def test_opening_a_pdf_page_with_a_native_text_layer_skips_ocr_entirely(qtbot, d
     window._open_file(pdf_path)
 
     assert len(document.pages) == 1
-    assert pool.submitted_pages == []  # never went through OCR
-    assert document.pages[0].ocr_status is OcrStatus.DONE
-    assert document.pages[0].ocr_result.confidence_score == 100.0
-    assert "word0" in document.pages[0].ocr_result.raw_text
-    assert "نص أصلي" in window._page_list.item(0).text()
+    assert len(pool.submitted_pages) == 1  # went through OCR despite having a real text layer
 
 
 def test_opening_a_broken_pdf_shows_a_warning_not_a_crash(qtbot, document, tmp_path: Path, monkeypatch) -> None:

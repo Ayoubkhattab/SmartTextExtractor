@@ -15,6 +15,7 @@ from PIL import Image
 from smart_text_extractor.core.models import OcrResult
 from smart_text_extractor.ocr.preprocessing import preprocess
 from smart_text_extractor.ocr.reorder import (
+    assemble_markdown,
     assemble_text_segments,
     group_into_lines,
     merge_dual_language_passes,
@@ -87,10 +88,15 @@ class OcrEngine:
 
         segments = assemble_text_segments(ordered_lines)
         raw_text = "".join(segment.text for segment in segments)
+        markdown = assemble_markdown(ordered_lines)
         word_boxes = [word for line in ordered_lines for word in line.words]
         confidences = [word.confidence for word in word_boxes]
         confidence_score = sum(confidences) / len(confidences) if confidences else 0.0
 
         return OcrResult(
-            raw_text=raw_text, word_boxes=word_boxes, segments=segments, confidence_score=confidence_score
+            raw_text=raw_text,
+            word_boxes=word_boxes,
+            segments=segments,
+            markdown=markdown,
+            confidence_score=confidence_score,
         )

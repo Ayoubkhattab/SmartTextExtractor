@@ -181,6 +181,86 @@ def test_scan_with_devices_shows_a_different_message(qtbot, document, monkeypatc
     assert "1" in shown[0][2]  # message text mentions the device count
 
 
+def test_export_markdown_with_no_done_pages_shows_information_message(qtbot, document, monkeypatch) -> None:
+    window = MainWindow(document, _FakeOcrPool(), _FakeScannerService())
+    qtbot.addWidget(window)
+
+    shown = []
+    monkeypatch.setattr(
+        "smart_text_extractor.ui.main_window.QMessageBox.information",
+        lambda *args, **kwargs: shown.append(args),
+    )
+    save_calls = []
+    monkeypatch.setattr(
+        "smart_text_extractor.ui.main_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: save_calls.append(args) or ("", ""),
+    )
+
+    window._on_export_markdown()
+
+    assert len(shown) == 1
+    assert save_calls == []  # never even prompted for a save path
+
+
+def test_export_markdown_writes_markdown_for_unedited_pages_and_plain_text_for_edited_ones(
+    qtbot, document, sample_image, tmp_path: Path, monkeypatch
+) -> None:
+    pool = _FakeOcrPool()  # submit() assigns the SAME OcrResult instance to every page
+    window = MainWindow(document, pool, _FakeScannerService())
+    qtbot.addWidget(window)
+
+    window._add_page(sample_image)  # page 0: kept as a fresh, unedited OCR result below
+    window._add_page(sample_image)  # page 1: will be edited by the user below
+
+    # Give each page its own independent OcrResult — the fake pool shares
+    # one instance across every submit() call, which isn't representative
+    # of the real per-page OcrWorkerPool and would make the two pages'
+    # edited_text alias each other if left as-is.
+    document.pages[0].ocr_result = OcrResult(raw_text="RAW A", markdown="## RAW A (as markdown)")
+    document.pages[1].ocr_result = OcrResult(raw_text="RAW B", markdown="## RAW B (as markdown)")
+
+    window._page_list.setCurrentRow(1)
+    window._text_edit.setPlainText("user's edited text")  # sets page 1's edited_text
+
+    save_path = tmp_path / "export"  # deliberately no .md suffix
+    monkeypatch.setattr(
+        "smart_text_extractor.ui.main_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(save_path), ""),
+    )
+
+    window._on_export_markdown()
+
+    written_path = tmp_path / "export.md"
+    assert written_path.exists()
+    content = written_path.read_text(encoding="utf-8")
+    assert content == "## RAW A (as markdown)\n\n---\n\nuser's edited text"
+
+
+def test_export_markdown_skips_pages_excluded_from_range(qtbot, document, sample_image, tmp_path: Path, monkeypatch) -> None:
+    pool = _FakeOcrPool(result=OcrResult(raw_text="included", markdown="included"))
+    window = MainWindow(document, pool, _FakeScannerService())
+    qtbot.addWidget(window)
+
+    window._add_page(sample_image)
+    document.pages[0].included_in_range = False
+
+    save_path = tmp_path / "export.md"
+    monkeypatch.setattr(
+        "smart_text_extractor.ui.main_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(save_path), ""),
+    )
+    shown = []
+    monkeypatch.setattr(
+        "smart_text_extractor.ui.main_window.QMessageBox.information",
+        lambda *args, **kwargs: shown.append(args),
+    )
+
+    window._on_export_markdown()
+
+    assert len(shown) == 1  # no exportable pages left once the only page is excluded
+    assert not save_path.exists()
+
+
 def test_opening_a_multi_page_pdf_adds_one_page_per_pdf_page(qtbot, document, tmp_path: Path) -> None:
     import pymupdf
 

@@ -5,11 +5,15 @@ from __future__ import annotations
 from smart_text_extractor.core.models import BoundingBox, Rect, TextSegment
 from smart_text_extractor.ocr.reorder import (
     Line,
+    _block_is_tabular,
     _is_majority_arabic,
     _is_mostly_latin,
+    _line_cells,
     _line_segments_with_cell_separators,
     _line_text_with_cell_separators,
+    _rows_to_markdown_table,
     _split_line_into_column_runs,
+    assemble_markdown,
     assemble_text,
     assemble_text_segments,
     group_into_lines,
@@ -388,3 +392,148 @@ class TestSegments:
 
     def test_assemble_text_segments_on_empty_lines_returns_empty_list(self) -> None:
         assert assemble_text_segments([]) == []
+
+
+def _one_word_line(text: str, height: int, block_num: int) -> Line:
+    return Line(words=[BoundingBox(text, Rect(0, 0, 60, height), 90.0)], block_num=block_num, par_num=0, line_num=1)
+
+
+class TestAssembleMarkdown:
+    """Tests for the Markdown export (§7.1.1 extension) — real tables
+    become Markdown tables, a real heading becomes '## ...'."""
+
+    def test_real_world_regression_heading_line_flagged_but_table_header_and_title_are_not(self) -> None:
+        """The exact 20 real word heights measured across every line of
+        page 3, هيكلية القسم والمكاتب.pdf (docs/phases/phase-2-ocr-pipeline.md)
+        — median 38px. The real section heading (74px, ratio 1.95) must
+        be flagged; the real table header row (60px, ratio 1.58) and the
+        page's own title (39px — apparently bolded, not enlarged, in the
+        source) must not be, per _HEADING_HEIGHT_RATIO's calibration.
+        """
+        real_heights = [39, 74, 44, 46, 45, 29, 46, 31, 46, 60, 36, 38, 35, 38, 37, 35, 30, 43, 37, 37]
+        lines = [_one_word_line(f"word{i}", h, block_num=i) for i, h in enumerate(real_heights)]
+        lines[0] = _one_word_line("مقترح", 39, block_num=0)  # the real title
+        lines[1] = _one_word_line("الإطار", 74, block_num=1)  # the real heading
+        lines[9] = _one_word_line("التواتر", 60, block_num=9)  # the real table header row
+        lines[16] = _one_word_line("Definition", 30, block_num=16)  # "Definition of Done" box label
+
+        markdown = assemble_markdown(lines)
+
+        assert "## الإطار" in markdown
+        assert "مقترح" in markdown and "## مقترح" not in markdown
+        assert "التواتر" in markdown and "## التواتر" not in markdown
+        assert "Definition" in markdown and "## Definition" not in markdown
+
+    def test_line_cells_splits_on_a_real_cell_boundary(self) -> None:
+        # 3 real words from the real table row (docs/phases/phase-2-ocr-pipeline.md):
+        # "الدورة"|"بداية كل" — needs a 3rd word so the heuristic has a
+        # small reference gap (12px, بداية↔كل) to judge the 173px real
+        # boundary gap (الدورة↔بداية) against — a 2-word line's one gap
+        # can never be an outlier relative to itself, by construction.
+        rect_start = Rect(2039, 1325, 84, 37)  # "الدورة"
+        rect_mid = Rect(1799, 1325, 67, 37)  # "بداية"
+        rect_end = Rect(1759, 1325, 28, 37)  # "كل"
+        line = Line(
+            words=[
+                BoundingBox("الدورة", rect_start, 90.0),
+                BoundingBox("بداية", rect_mid, 90.0),
+                BoundingBox("كل", rect_end, 90.0),
+            ],
+            block_num=1,
+            par_num=0,
+            line_num=1,
+        )
+        assert _line_cells(line) == ["الدورة", "بداية كل"]
+
+    def test_line_cells_returns_single_cell_when_no_boundary_detected(self) -> None:
+        line = Line(
+            words=[BoundingBox("First", Rect(0, 0, 60, 20), 90.0), BoundingBox("Second", Rect(70, 0, 60, 20), 90.0)],
+            block_num=1,
+            par_num=0,
+            line_num=1,
+        )
+        assert _line_cells(line) == ["First Second"]
+
+    @staticmethod
+    def _two_cell_row(right_text: str, mid_text: str, left_text: str, block_num: int, line_num: int) -> Line:
+        """A 2-cell row: `mid`+`left` sit close together (30px gap) forming
+        one (2-word) cell, `right` sits far away (350px gap) forming the
+        other, alone. Verified arithmetic: min_gap=30,
+        threshold=max(30*4,40)=120, so the 350px gap splits (350>120) and
+        the 30px one doesn't. 3 words are required, not 2 — a 2-word
+        line's one gap can never be an outlier relative to itself — see
+        test_line_cells_splits_on_a_real_cell_boundary.
+        """
+        return Line(
+            words=[
+                BoundingBox(right_text, Rect(500, 0, 60, 20), 90.0),
+                BoundingBox(mid_text, Rect(90, 0, 60, 20), 90.0),
+                BoundingBox(left_text, Rect(0, 0, 60, 20), 90.0),
+            ],
+            block_num=block_num,
+            par_num=0,
+            line_num=line_num,
+        )
+
+    def test_two_cell_row_helper_actually_splits_into_two_cells(self) -> None:
+        row = self._two_cell_row("R", "M", "L", block_num=1, line_num=1)
+        assert _line_cells(row) == ["R", "M L"]  # cell 2 is naturally 2 words, like a real table cell often is
+
+    def test_block_is_tabular_requires_a_majority_not_every_row(self) -> None:
+        def plain_row(n: int) -> Line:
+            return Line(words=[BoundingBox(f"plain{n}", Rect(0, 0, 60, 20), 90.0)], block_num=1, par_num=0, line_num=n)
+
+        row1 = self._two_cell_row("a1", "b1", "c1", block_num=1, line_num=1)
+        row2 = self._two_cell_row("a2", "b2", "c2", block_num=1, line_num=2)
+
+        assert _block_is_tabular([row1, row2, plain_row(3)]) is True  # 2/3 rows split
+        assert _block_is_tabular([row1, plain_row(2), plain_row(3)]) is False  # only 1/3 rows split
+        assert _block_is_tabular([row1]) is False  # a single row is never "a table"
+
+    def test_rows_to_markdown_table_pads_ragged_rows(self) -> None:
+        table = _rows_to_markdown_table([["A", "B", "C"], ["1", "2"]])
+        lines = table.splitlines()
+        assert lines[0] == "| A | B | C |"
+        assert lines[1] == "| --- | --- | --- |"
+        assert lines[2] == "| 1 | 2 |  |"  # padded to 3 columns with an empty cell
+
+    def test_assemble_markdown_renders_a_multi_row_table_and_a_plain_paragraph(self) -> None:
+        # height=20 to match _two_cell_row's word heights below — keeps
+        # this test focused on table-vs-paragraph rendering, not heading
+        # detection (a mismatched height here would pull the page median
+        # down and wrongly flag this line as a heading by comparison).
+        paragraph_line = _one_word_line("فقرة", 20, block_num=1)
+        table_rows = [
+            self._two_cell_row("خلية1ب", "M1", "خلية1أ", block_num=2, line_num=1),
+            self._two_cell_row("خلية2ب", "M2", "خلية2أ", block_num=2, line_num=2),
+        ]
+
+        markdown = assemble_markdown([paragraph_line, *table_rows])
+
+        assert markdown.startswith("فقرة\n\n")
+        table_part = markdown.split("\n\n", 1)[1]
+        assert table_part.splitlines()[1] == "| --- | --- |"
+
+    def test_isolated_tabular_line_merges_as_header_for_the_table_block_after_it(self) -> None:
+        """Illustrates the header-merge mechanism with a clean synthetic
+        gap (honesty note: on the real page this was calibrated against,
+        the real table header row did NOT itself have a detectable cell
+        gap, so this exact path doesn't fire there — see
+        assemble_markdown's docstring. This proves the mechanism works
+        when a header row DOES have one, which real tables with a
+        differently-styled header bar plausibly could.)
+        """
+        header_row = self._two_cell_row("Col2Header", "Col1", "Header", block_num=1, line_num=1)
+        data_row_1 = self._two_cell_row("R1C2", "R1", "C1", block_num=2, line_num=1)
+        data_row_2 = self._two_cell_row("R2C2", "R2", "C1", block_num=2, line_num=2)
+
+        markdown = assemble_markdown([header_row, data_row_1, data_row_2])
+
+        lines = markdown.splitlines()
+        assert lines[0] == "| Col2Header | Col1 Header |"
+        assert lines[1] == "| --- | --- |"
+        assert lines[2] == "| R1C2 | R1 C1 |"
+        assert lines[3] == "| R2C2 | R2 C1 |"
+
+    def test_assemble_markdown_on_empty_lines_returns_empty_string(self) -> None:
+        assert assemble_markdown([]) == ""

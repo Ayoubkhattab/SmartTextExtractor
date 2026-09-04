@@ -396,3 +396,165 @@ def assemble_text_segments(lines: list[Line]) -> list[TextSegment]:
 
 def assemble_text(lines: list[Line]) -> str:
     return "".join(segment.text for segment in assemble_text_segments(lines))
+
+
+# Markdown export (§7.1.1 extension): a real, drawn table's header row and
+# a document heading measure structurally identical on a real page — both
+# are an isolated single-line Tesseract block, taller than surrounding
+# body text (confirmed real, page 3 of هيكلية القسم والمكاتب.pdf: the
+# genuine section heading "الإطار المنيجي (Agile) — ثانياً" measured
+# 74px vs a page-median line height of 38px — a 1.95x ratio — while that
+# SAME page's real table header row ("التواتر والمدة المُخْرَج
+# المُلزِم") measured 60px — a 1.58x ratio: taller than body text too,
+# but well short of the heading. _HEADING_HEIGHT_RATIO=1.75 sits in the
+# gap between those two real, measured ratios, so it catches the genuine
+# heading without also flagging the table header as one. This is a
+# precision-first, deliberately conservative threshold: on that same
+# page it also does NOT flag the page's own title (39px, ratio 1.03 —
+# apparently bolded rather than enlarged in the source) or the
+# "Definition of Done/Ready" box labels (30px — smaller than body text,
+# emphasized by color/box rather than size) as headings. Those are real,
+# accepted misses, not bugs: there is no font-weight or color signal in
+# Tesseract's TSV output to catch them with, and a threshold loose enough
+# to catch them would also catch the table header — see the ratios above.
+_HEADING_HEIGHT_RATIO = 1.75
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 0:
+        return (ordered[mid - 1] + ordered[mid]) / 2
+    return ordered[mid]
+
+
+def _line_median_height(line: Line) -> float:
+    return _median([word.rect.height for word in line.words])
+
+
+def _line_cells(line: Line, gap_multiplier: float = 4.0, min_gap_threshold: float = 40.0) -> list[str]:
+    """Splits one line into per-cell strings using the same gap-based
+    boundary detection as _line_segments_with_cell_separators — a line
+    with no detected boundary comes back as a single-element list (its
+    whole text), which callers use as the "not actually multi-cell"
+    signal.
+    """
+    segments = _line_segments_with_cell_separators(line, gap_multiplier, min_gap_threshold)
+    cells: list[str] = [""]
+    for segment in segments:
+        if segment.text == " | ":
+            cells.append("")
+        else:
+            cells[-1] += segment.text
+    return [cell.strip() for cell in cells]
+
+
+def _block_is_tabular(block_lines: list[Line]) -> bool:
+    """A block reads as a table when most of its rows actually split into
+    cells — a majority rather than every row, because real, messy tables
+    (confirmed on the same real table: its last couple of rows) don't
+    always get a clean cell split on every single row (a known limitation
+    of the gap-based boundary heuristic — see
+    docs/phases/phase-2-ocr-pipeline.md); requiring 100% would silently
+    demote an otherwise-obvious table to plain paragraph text over one or
+    two ragged rows.
+    """
+    if len(block_lines) < 2:
+        return False
+    rows_with_a_cell_boundary = sum(1 for line in block_lines if len(_line_cells(line)) > 1)
+    return rows_with_a_cell_boundary / len(block_lines) > 0.5
+
+
+def _rows_to_markdown_table(rows: list[list[str]]) -> str:
+    """Ragged rows (a real, messy table can have a different cell count
+    per row — see _block_is_tabular) are padded to the widest row with
+    empty cells rather than truncated, so no recognized text is dropped
+    just to keep the grid rectangular."""
+    column_count = max(len(row) for row in rows)
+    padded_rows = [row + [""] * (column_count - len(row)) for row in rows]
+    header, *data_rows = padded_rows
+    table_lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(["---"] * column_count) + " |"]
+    table_lines.extend("| " + " | ".join(row) + " |" for row in data_rows)
+    return "\n".join(table_lines)
+
+
+def _render_plain_block(block_lines: list[Line], page_median_height: float) -> list[str]:
+    """Renders one non-tabular block as one or more top-level Markdown
+    units: consecutive body-height lines join into a single paragraph
+    (newline-separated, matching assemble_text), but a heading-height
+    line is broken out as its own '## ...' unit so it gets the blank-line
+    spacing Markdown headings need, instead of being folded into a
+    paragraph's interior line — confirmed real: on the page this was
+    calibrated against, the genuine heading is the second line of a
+    2-line block (title line, then heading line), not alone in its own
+    block, so heading detection has to work at the line level, not just
+    flag single-line blocks.
+    """
+    units: list[str] = []
+    paragraph_lines: list[str] = []
+    for line in block_lines:
+        if _line_median_height(line) > page_median_height * _HEADING_HEIGHT_RATIO:
+            if paragraph_lines:
+                units.append("\n".join(paragraph_lines))
+                paragraph_lines = []
+            units.append(f"## {line.text}")
+        else:
+            paragraph_lines.append(_line_text_with_cell_separators(line))
+    if paragraph_lines:
+        units.append("\n".join(paragraph_lines))
+    return units
+
+
+def assemble_markdown(lines: list[Line]) -> str:
+    """Structured Markdown export: real tables become Markdown tables and
+    a real heading becomes '## ...', instead of everything flattening
+    into plain paragraphs. Builds entirely on already-validated pieces
+    (the same per-block grouping and cell-boundary detection assemble_text
+    uses) rather than new signal — deliberately does NOT attempt real
+    table-gridline detection from the image: tried it during this
+    session's investigation and found it unreliable on real documents
+    (a naive OpenCV morphological line detector mostly picked up dense
+    text strokes, not drawn borders — see
+    docs/phases/phase-2-ocr-pipeline.md), so this reuses the
+    already-proven word-gap heuristic instead.
+    """
+    if not lines:
+        return ""
+
+    page_median_height = _median([word.rect.height for line in lines for word in line.words])
+
+    blocks: list[list[Line]] = [[]]
+    current_block_num = lines[0].block_num
+    for line in lines:
+        if line.block_num != current_block_num:
+            blocks.append([])
+            current_block_num = line.block_num
+        blocks[-1].append(line)
+
+    rendered_units: list[str] = []
+    i = 0
+    while i < len(blocks):
+        block_lines = blocks[i]
+        is_isolated_tabular_line = len(block_lines) == 1 and len(_line_cells(block_lines[0])) > 1
+        next_block_is_a_table = i + 1 < len(blocks) and _block_is_tabular(blocks[i + 1])
+
+        if is_isolated_tabular_line and next_block_is_a_table:
+            # A single cell-separated line immediately before a table
+            # block reads as that table's header row, split into its own
+            # Tesseract block — real tables can have a visually distinct
+            # header (e.g. a colored bar) that segments separately from
+            # the data rows below it. Fold it in as the header instead of
+            # letting the table below fall back to using its own first
+            # data row as a stand-in header.
+            rows = [_line_cells(block_lines[0])] + [_line_cells(line) for line in blocks[i + 1]]
+            rendered_units.append(_rows_to_markdown_table(rows))
+            i += 2
+            continue
+
+        if _block_is_tabular(block_lines):
+            rendered_units.append(_rows_to_markdown_table([_line_cells(line) for line in block_lines]))
+        else:
+            rendered_units.extend(_render_plain_block(block_lines, page_median_height))
+        i += 1
+
+    return "\n\n".join(rendered_units)

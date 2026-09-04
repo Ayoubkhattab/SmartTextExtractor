@@ -77,6 +77,7 @@ class OcrResult:
     edited_text: str | None = None  # None until the user edits (US-06); re-OCR never touches this
     word_boxes: list[BoundingBox] = field(default_factory=list)
     segments: list[TextSegment] = field(default_factory=list)
+    markdown: str = ""  # structured export (§7.1.1): real tables/headings, not just flat text
     confidence_score: float = 0.0
 
 

@@ -138,6 +138,10 @@ class MainWindow(QMainWindow):
         scan_action.triggered.connect(self._on_scan)
         toolbar.addAction(scan_action)
 
+        export_action = QAction("تصدير كـ Markdown...", self)
+        export_action.triggered.connect(self._on_export_markdown)
+        toolbar.addAction(export_action)
+
     def _build_central_widget(self) -> None:
         self._page_list = QListWidget()
         self._page_list.setIconSize(QSize(self._THUMBNAIL_SIZE, self._THUMBNAIL_SIZE))
@@ -226,6 +230,44 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "أجهزة موجودة", f"تم العثور على {len(devices)} جهاز — دعم المسح الكامل قيد الإنجاز."
         )
+
+    def _on_export_markdown(self) -> None:
+        # US-08's included_in_range already exists for exactly this: which
+        # pages belong in an export. A page whose OCR isn't DONE (still
+        # processing, failed, or never run) has no text worth exporting.
+        exportable_pages = [
+            page
+            for page in self._document.pages
+            if page.included_in_range and page.ocr_status == OcrStatus.DONE and page.ocr_result is not None
+        ]
+        if not exportable_pages:
+            QMessageBox.information(self, "لا يوجد نص لتصديره", "لا توجد صفحات مكتملة المعالجة لتصديرها.")
+            return
+
+        path_str, _ = QFileDialog.getSaveFileName(self, "تصدير كملف Markdown", "", "ملفات Markdown (*.md)")
+        if not path_str:
+            return
+        path = Path(path_str)
+        if path.suffix.lower() != ".md":
+            path = path.with_suffix(".md")
+
+        # A page the user has edited only has edited_text — a plain
+        # string with no positional/height data left to detect headings
+        # or tables from, so it's included as-is rather than reformatted.
+        page_texts = [
+            page.ocr_result.edited_text
+            if page.ocr_result.edited_text is not None
+            else (page.ocr_result.markdown or page.ocr_result.raw_text)
+            for page in exportable_pages
+        ]
+
+        try:
+            path.write_text("\n\n---\n\n".join(page_texts), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "تعذّر الحفظ", f"تعذّر حفظ الملف:\n{exc}")
+            return
+
+        self.statusBar().showMessage(f"تم تصدير {len(exportable_pages)} صفحة إلى {path.name}")
 
     def _add_page(self, image_path: Path) -> None:
         page = self._document.add_page(image_path)

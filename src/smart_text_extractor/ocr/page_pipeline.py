@@ -28,7 +28,43 @@ import pymupdf
 from smart_text_extractor.core.models import OcrResult, Page
 from smart_text_extractor.ocr.layout_boxes import group_units_into_boxes
 from smart_text_extractor.ocr.native_pdf_style import PageStyleIndex
+from smart_text_extractor.ocr.table_grid import build_table_units, detect_table_grids
 from smart_text_extractor.ocr.native_pdf_text import extract_native_text_result, page_layout_of
+
+
+def _covered_by(unit_bbox, grid_bbox) -> float:
+    x0, y0 = max(unit_bbox.x, grid_bbox.x), max(unit_bbox.y, grid_bbox.y)
+    x1 = min(unit_bbox.x + unit_bbox.width, grid_bbox.x + grid_bbox.width)
+    y1 = min(unit_bbox.y + unit_bbox.height, grid_bbox.y + grid_bbox.height)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    area = unit_bbox.width * unit_bbox.height
+    return ((x1 - x0) * (y1 - y0)) / area if area else 0.0
+
+
+def _apply_table_grids(units, word_boxes, grids):
+    """Replaces whatever fell inside a drawn table with the real table.
+
+    The gap-based classifier has already turned that region into something
+    — usually a stack of paragraphs, sometimes a table with the wrong
+    shape. Those units are dropped rather than kept alongside, or the same
+    content would appear twice.
+    """
+    if not grids:
+        return units
+
+    table_units, _consumed = build_table_units(grids, word_boxes)
+    if not table_units:
+        return units
+
+    kept = [
+        unit
+        for unit in units
+        if unit.bbox is None or not any(_covered_by(unit.bbox, grid.bbox) > 0.5 for grid in grids)
+    ]
+    merged = kept + table_units
+    merged.sort(key=lambda unit: (unit.bbox.y if unit.bbox else 0, unit.bbox.x if unit.bbox else 0))
+    return merged
 
 
 def run_page(page: Page, engine) -> OcrResult:
@@ -68,6 +104,12 @@ def run_page(page: Page, engine) -> OcrResult:
                     return native_result
 
             ocr_result.page_layout = layout
+            # The page's drawn table grids apply whether or not its text
+            # layer is trustworthy — the rules are drawn either way — so an
+            # OCR'd page gets real cells instead of gap-guessed ones too.
+            ocr_result.document_units = _apply_table_grids(
+                ocr_result.document_units, ocr_result.word_boxes, detect_table_grids(pdf_page, source.render_dpi)
+            )
             ocr_result.document_units = group_units_into_boxes(
                 ocr_result.document_units, style_index.container_boxes
             )

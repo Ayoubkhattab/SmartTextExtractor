@@ -222,10 +222,6 @@ class MainWindow(QMainWindow):
         export_word_action.triggered.connect(self._on_export_word)
         toolbar.addAction(export_word_action)
 
-        export_markdown_action = QAction("تصدير كـ Markdown...", self)
-        export_markdown_action.triggered.connect(self._on_export_markdown)
-        toolbar.addAction(export_markdown_action)
-
         export_pdf_action = QAction("تصدير PDF قابل للبحث...", self)
         export_pdf_action.triggered.connect(self._on_export_searchable_pdf)
         toolbar.addAction(export_pdf_action)
@@ -370,37 +366,6 @@ class MainWindow(QMainWindow):
             for page in self._document.pages
             if page.included_in_range and page.ocr_status == OcrStatus.DONE and page.ocr_result is not None
         ]
-
-    def _on_export_markdown(self) -> None:
-        exportable_pages = self._exportable_pages()
-        if not exportable_pages:
-            QMessageBox.information(self, "لا يوجد نص لتصديره", "لا توجد صفحات مكتملة المعالجة لتصديرها.")
-            return
-
-        path_str, _ = QFileDialog.getSaveFileName(self, "تصدير كملف Markdown", "", "ملفات Markdown (*.md)")
-        if not path_str:
-            return
-        path = Path(path_str)
-        if path.suffix.lower() != ".md":
-            path = path.with_suffix(".md")
-
-        # A page the user has edited only has edited_text — a plain
-        # string with no positional/height data left to detect headings
-        # or tables from, so it's included as-is rather than reformatted.
-        page_texts = [
-            page.ocr_result.edited_text
-            if page.ocr_result.edited_text is not None
-            else (page.ocr_result.markdown or page.ocr_result.raw_text)
-            for page in exportable_pages
-        ]
-
-        try:
-            path.write_text("\n\n---\n\n".join(page_texts), encoding="utf-8")
-        except OSError as exc:
-            QMessageBox.warning(self, "تعذّر الحفظ", f"تعذّر حفظ الملف:\n{exc}")
-            return
-
-        self.statusBar().showMessage(f"تم تصدير {len(exportable_pages)} صفحة إلى {path.name}")
 
     def _on_export_word(self) -> None:
         exportable_pages = self._exportable_pages()

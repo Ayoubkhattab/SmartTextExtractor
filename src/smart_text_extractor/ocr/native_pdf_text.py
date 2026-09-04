@@ -36,6 +36,7 @@ import pymupdf
 from smart_text_extractor.core.models import BoundingBox, DocumentUnit, OcrResult, PageLayout, Rect
 from smart_text_extractor.ocr.layout_boxes import group_units_into_boxes
 from smart_text_extractor.ocr.native_pdf_style import PageStyleIndex
+from smart_text_extractor.ocr.table_grid import build_table_units, detect_table_grids
 from smart_text_extractor.ocr.native_text_repair import find_orphan_ocr_words, repair_native_words
 from smart_text_extractor.ocr.reorder import (
     _is_majority_arabic,
@@ -125,6 +126,20 @@ def page_layout_of(page: pymupdf.Page) -> PageLayout:
         margin_top=vertical,
         margin_bottom=vertical,
     )
+
+
+def _merge_in_reading_order(units: list[DocumentUnit], tables: list[DocumentUnit]) -> list[DocumentUnit]:
+    """Puts the separately-detected tables back where they belong on the page.
+
+    Both lists are already in reading order within themselves, so merging on
+    vertical position is enough — and it keeps a table between the
+    paragraphs that surround it rather than appended after them.
+    """
+    if not tables:
+        return units
+    merged = units + tables
+    merged.sort(key=lambda unit: (unit.bbox.y if unit.bbox else 0, unit.bbox.x if unit.bbox else 0))
+    return merged
 
 
 def _apply_vertical_rhythm(units: list[DocumentUnit], points_to_pixels: float) -> None:
@@ -338,12 +353,20 @@ def extract_native_text_result(
         for offset, orphan in enumerate(find_orphan_ocr_words(native_boxes, ocr_word_boxes)):
             tagged.append((orphan, next_block_num + offset, 0, 0))
 
+    # Tables the page actually draws are taken from its own grid rather than
+    # guessed from word spacing (ocr/table_grid.py); their words are then
+    # kept out of the ordinary flow so a table is not emitted twice.
+    grids = detect_table_grids(page, render_dpi)
+    table_units, consumed = build_table_units(grids, [box for box, *_ in tagged])
+    if consumed:
+        tagged = [entry for index, entry in enumerate(tagged) if index not in consumed]
+
     lines = group_into_lines(tagged)
     ordered_lines = order_lines_reading_order(lines)
     segments = assemble_text_segments(ordered_lines)
     raw_text = "".join(segment.text for segment in segments)
 
-    document_units = classify_document_units(ordered_lines)
+    document_units = _merge_in_reading_order(classify_document_units(ordered_lines), table_units)
     document_units = group_units_into_boxes(document_units, style_index.container_boxes)
     _apply_vertical_rhythm(document_units, points_to_pixels)
 

@@ -253,6 +253,28 @@ def _cell_segments(words: list[BoundingBox], rtl: bool) -> list[TextSegment]:
     return segments
 
 
+def _column_widths(grid: TableGrid) -> list[float]:
+    """Each column's share of the table's width, left to right.
+
+    Taken from the widest cell recorded in each column rather than from
+    one chosen row, so a row with a merged or missing cell cannot decide
+    the whole column. Returns [] if the shares do not add up — a grid
+    with gaps in it describes no proportion worth trusting, and an even
+    split is the better reconstruction.
+    """
+    widths: list[float] = []
+    for column in range(max(len(row) for row in grid.cells)):
+        cells = [row[column] for row in grid.cells if column < len(row) and row[column] is not None]
+        if not cells:
+            return []
+        widths.append(max(cell.width for cell in cells))
+
+    total = sum(widths)
+    if total <= 0 or abs(total - grid.bbox.width) > 0.05 * grid.bbox.width:
+        return []
+    return [width / total for width in widths]
+
+
 def build_table_units(
     grids: list[TableGrid], words: list[BoundingBox], rtl: bool = True
 ) -> tuple[list[DocumentUnit], set[int]]:
@@ -291,6 +313,14 @@ def build_table_units(
             continue
 
         consumed.update(used_here)
-        units.append(DocumentUnit(kind="table", rows=rows, bbox=grid.bbox, bordered=grid.stroked))
+        units.append(
+            DocumentUnit(
+                kind="table",
+                rows=rows,
+                bbox=grid.bbox,
+                bordered=grid.stroked,
+                column_widths=_column_widths(grid),
+            )
+        )
 
     return units, consumed

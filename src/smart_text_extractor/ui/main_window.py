@@ -19,6 +19,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QTextCharFormat,
     QTextCursor,
+    QTextLength,
     QTextFrameFormat,
     QTextTableFormat,
 )
@@ -764,6 +765,7 @@ class MainWindow(QMainWindow):
         rows: list[list[list[TextSegment]]],
         box_fill: str | None = None,
         bordered: bool = True,
+        column_widths: list[float] | None = None,
     ) -> None:
         """Builds a real table grid instead of pipe-separated text —
         right-to-left, so cell 0 (the first cell in reading order) lands
@@ -792,6 +794,14 @@ class MainWindow(QMainWindow):
             table_format.setBorder(0)
             table_format.setCellPadding(_BOX_PADDING)
             table_format.setBackground(QColor(box_fill))
+        # The source's own column proportions, where they were measured:
+        # a narrow count column beside wide description columns is not
+        # reproduced by Qt's even split. Widths are recorded left to
+        # right, which is the order Qt constrains them in.
+        if column_widths and len(column_widths) == column_count:
+            table_format.setColumnWidthConstraints(
+                [QTextLength(QTextLength.Type.PercentageLength, width * 100) for width in column_widths]
+            )
         table = cursor.insertTable(len(rows), column_count, table_format)
         for row_index, row in enumerate(rows):
             for logical_column, cell_segments in enumerate(row):
@@ -915,7 +925,7 @@ class MainWindow(QMainWindow):
             if unit.kind == "heading":
                 self._insert_segments(cursor, unit.segments, heading=True)
             elif unit.kind == "table":
-                self._insert_table(cursor, unit.rows, unit.box_fill, unit.bordered)
+                self._insert_table(cursor, unit.rows, unit.box_fill, unit.bordered, unit.column_widths)
             else:
                 self._insert_segments(cursor, unit.segments)
 

@@ -118,6 +118,27 @@ def _insert_text_that_fits(page, box, text, *, fontname, font_size, colour, alig
 _GRID_COLOUR = (0.6, 0.6, 0.6)
 
 
+def _column_edges(widths: list[float], column_count: int, left: float, right: float) -> list[float]:
+    """The x of every column boundary, left to right.
+
+    Uses the source's own proportions where the model recorded them — a
+    table with a narrow count column beside wide description columns is
+    not reproduced by an even split. Falls back to equal shares when the
+    proportions are missing or do not match the number of columns, which
+    is what the model promises when it cannot measure them.
+    """
+    span = right - left
+    if len(widths) != column_count:
+        return [left + span * index / column_count for index in range(column_count + 1)]
+
+    edges, offset = [left], 0.0
+    for width in widths:
+        offset += width
+        edges.append(left + span * offset)
+    edges[-1] = right
+    return edges
+
+
 def _cell_shade(cell: list[TextSegment]) -> str | None:
     """The fill most of a cell's words sit on, or None if most sit on none.
 
@@ -150,15 +171,15 @@ def _draw_table(page, box, unit: DocumentUnit, fontname: str, render_dpi: int) -
         return
 
     row_height = (box.y1 - box.y0) / row_count
-    column_width = (box.x1 - box.x0) / column_count
+    edges = _column_edges(unit.column_widths, column_count, box.x0, box.x1)
 
     for row_index, row in enumerate(unit.rows):
         for logical_column, cell in enumerate(row):
             visual_column = column_count - 1 - logical_column
             cell_box = pymupdf.Rect(
-                box.x0 + visual_column * column_width,
+                edges[visual_column],
                 box.y0 + row_index * row_height,
-                box.x0 + (visual_column + 1) * column_width,
+                edges[visual_column + 1],
                 box.y0 + (row_index + 1) * row_height,
             )
             # Reproduce how the page draws the table, not one fixed style:

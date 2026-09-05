@@ -231,3 +231,50 @@ class TestFillDerivedGridOnRealPages:
 
         assert [len(grid.cells) for grid in grids] == [9, 5]
         assert all(grid.stroked for grid in grids)
+
+
+class TestColumnWidths:
+    """Reproducing the source's own proportions is worth 17 points of
+    visual similarity on the page whose table has a narrow count column
+    beside wide description columns; an even split flattens it."""
+
+    def _uneven(self) -> TableGrid:
+        widths = [40, 200, 60]
+        cells, x = [], 0
+        row = []
+        for width in widths:
+            row.append(Rect(x, 0, width, 30))
+            x += width
+        cells = [row, [Rect(cell.x, 30, cell.width, 30) for cell in row]]
+        return TableGrid(bbox=Rect(0, 0, sum(widths), 60), cells=cells)
+
+    def test_proportions_come_from_the_grid(self) -> None:
+        from smart_text_extractor.ocr.table_grid import _column_widths
+
+        widths = _column_widths(self._uneven())
+
+        assert [round(width, 3) for width in widths] == [0.133, 0.667, 0.2]
+        assert abs(sum(widths) - 1.0) < 1e-9
+
+    def test_a_grid_with_a_hole_describes_no_proportion(self) -> None:
+        """A column no row records cannot be measured, and an even split is
+        the better reconstruction of what is actually known."""
+        from smart_text_extractor.ocr.table_grid import _column_widths
+
+        grid = TableGrid(bbox=Rect(0, 0, 200, 60), cells=[[Rect(0, 0, 100, 30), None], [Rect(0, 30, 100, 30), None]])
+
+        assert _column_widths(grid) == []
+
+    def test_columns_that_do_not_fill_the_table_are_rejected(self) -> None:
+        from smart_text_extractor.ocr.table_grid import _column_widths
+
+        grid = TableGrid(bbox=Rect(0, 0, 500, 60), cells=[[Rect(0, 0, 50, 30), Rect(50, 0, 50, 30)]])
+
+        assert _column_widths(grid) == []
+
+    def test_the_unit_carries_them(self) -> None:
+        grid = self._uneven()
+
+        units, _ = build_table_units([grid], [_word("خلية", x=10, y=10)])
+
+        assert [round(width, 3) for width in units[0].column_widths] == [0.133, 0.667, 0.2]

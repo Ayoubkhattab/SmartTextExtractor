@@ -59,7 +59,6 @@ from smart_text_extractor.core.pdf_import import (
 )
 from smart_text_extractor.export.docx_export import PageContent, export_docx
 from smart_text_extractor.export.pdf_export import SearchablePage, export_searchable_pdf
-from smart_text_extractor.ocr.reorder import _is_majority_arabic
 from smart_text_extractor.scanner.service import ScannerService
 
 _TEXT_COLOR = "#1a1d21"
@@ -138,12 +137,80 @@ def _status_label(page: Page) -> str:
     return "قيد المعالجة"
 
 
+def _starts_right_to_left(text: str) -> bool:
+    """Whether a block runs right to left: it does if it contains Arabic.
+
+    The Unicode algorithm's own rule — direction from the FIRST strong
+    character (UAX #9) — was implemented first and measured against real
+    lines, where it got headings like "(Agile) الإطار المنهجي" wrong: the
+    first strong character is Latin, so the rule says left-to-right, while
+    the line is plainly an Arabic heading with a bracketed English term in
+    front of it.
+
+    Checked against every mixed line in these documents, the simpler rule
+    matches all of them — "ETL/ELT بث/تدفق: Kafka / Redpanda / MQTT" is
+    laid out right-to-left in the source too, despite opening in Latin and
+    carrying more Latin than Arabic. Counting letters was tried as well and
+    fails the same cases from the other direction. In an Arabic document,
+    a line with Arabic in it is an Arabic line; a line with none is not.
+    """
+    return any("؀" <= character <= "ࣿ" or "ﭐ" <= character <= "﷿" for character in text) or not any(
+        character.isalpha() for character in text
+    )
+
+
 def _unit_plain_text(unit: DocumentUnit) -> str:
     """The unit's text, whatever kind it is — used only to decide which
     edge the block should start from."""
     if unit.kind != "table":
         return "".join(segment.text for segment in unit.segments)
     return " ".join(segment.text for row in unit.rows for cell in row for segment in cell)
+
+
+def _cell_direction_text(cell_segments: list[TextSegment], rows: list[list[list[TextSegment]]]) -> str:
+    """The text a cell's direction should be read from.
+
+    Its own text, unless the cell holds no letters at all — a number, a
+    dash, or nothing. Those carry no direction of their own, and deciding
+    each one in isolation would set an empty cell against the table around
+    it, so the whole table's text decides instead and the column stays
+    consistent.
+    """
+    own = "".join(segment.text for segment in cell_segments)
+    if any(character.isalpha() for character in own):
+        return own
+    return " ".join(segment.text for row in rows for cell in row for segment in cell)
+
+
+def _bridge_highlight_gaps(segments: list[TextSegment]) -> list[TextSegment]:
+    """Extends a highlight across the spaces inside it.
+
+    A highlight is a rectangle the page draws behind a whole phrase, but it
+    reaches this pipeline attached to individual WORDS — the separators
+    between them carry no style, because a space was never a recognised
+    word. Painting only the words turns a continuous band into stripes with
+    white gaps between every word, which is what the panel was showing.
+
+    Only separators BETWEEN two words sharing the same highlight are
+    bridged, so a space at the edge of a highlighted phrase does not extend
+    the colour past where the page actually drew it.
+    """
+    bridged = list(segments)
+    for index in range(1, len(bridged) - 1):
+        current = bridged[index]
+        if current.confidence is not None or (current.style and current.style.highlight):
+            continue  # a real word, or already carrying the fill
+
+        before = _highlight_of(bridged[index - 1])
+        after = _highlight_of(bridged[index + 1])
+        if before is not None and before == after:
+            style = bridged[index - 1].style
+            bridged[index] = TextSegment(current.text, current.confidence, style)
+    return bridged
+
+
+def _highlight_of(segment: TextSegment) -> str | None:
+    return segment.style.highlight if segment.style else None
 
 
 def _dominant_highlight(segments: list[TextSegment]) -> str | None:
@@ -674,7 +741,7 @@ class MainWindow(QMainWindow):
         return pixels * _POINTS_PER_INCH / max(self.logicalDpiY(), 1)
 
     def _insert_segments(self, cursor: QTextCursor, segments: list[TextSegment], *, heading: bool = False) -> None:
-        for segment in segments:
+        for segment in _bridge_highlight_gaps(segments):
             cursor.insertText(
                 segment.text, self._char_format_for(segment.confidence, heading=heading, style=segment.style)
             )
@@ -692,7 +759,11 @@ class MainWindow(QMainWindow):
         self._insert_segments(cursor, segments)
 
     def _insert_table(
-        self, cursor: QTextCursor, rows: list[list[list[TextSegment]]], box_fill: str | None = None
+        self,
+        cursor: QTextCursor,
+        rows: list[list[list[TextSegment]]],
+        box_fill: str | None = None,
+        bordered: bool = True,
     ) -> None:
         """Builds a real table grid instead of pipe-separated text —
         right-to-left, so cell 0 (the first cell in reading order) lands
@@ -705,10 +776,15 @@ class MainWindow(QMainWindow):
         table_format = QTextTableFormat()
         table_format.setCellPadding(4)
         table_format.setCellSpacing(0)
-        if box_fill is None:
+        if box_fill is None and bordered:
             table_format.setBorder(1)
             table_format.setBorderStyle(QTextFrameFormat.BorderStyle.BorderStyle_Solid)
             table_format.setBorderBrush(_TABLE_BORDER_COLOR)
+        elif box_fill is None:
+            # A table the page draws as shaded cells rather than ruled
+            # lines: its own shading is already painted per cell below, and
+            # a grid around it is something the source never had.
+            table_format.setBorder(0)
         else:
             # A panel the page draws its content inside, not a data table:
             # it is defined by its fill, and a grid line around it is
@@ -732,6 +808,18 @@ class MainWindow(QMainWindow):
                     cell_format.setBackground(QColor(fill))
                     cell.setFormat(cell_format)
                 self._insert_segments(cell.firstCursorPosition(), cell_segments)
+                # A cell's blocks are the one path _render_document_units
+                # cannot reach: it aligns the blocks a unit produced, and a
+                # table's text lives inside cells that are not in that
+                # range. Measured on a real page, that left 18 blocks —
+                # every cell of the staffing table — starting from the LEFT
+                # while the paragraphs above them started from the right.
+                self._align_blocks_between(
+                    cell.firstCursorPosition().position(),
+                    cell.lastCursorPosition().position(),
+                    "",
+                    _cell_direction_text(cell_segments, rows),
+                )
         cursor.movePosition(QTextCursor.MoveOperation.End)
 
     def _apply_page_appearance(self, layout: PageLayout | None) -> None:
@@ -820,13 +908,35 @@ class MainWindow(QMainWindow):
         for index, unit in enumerate(units):
             if index > 0:
                 cursor.insertBlock()
-            self._apply_alignment(cursor, unit.alignment, _unit_plain_text(unit))
+            text = _unit_plain_text(unit)
+            self._apply_alignment(cursor, unit.alignment, text)
+            started_at = cursor.position()
+
             if unit.kind == "heading":
                 self._insert_segments(cursor, unit.segments, heading=True)
             elif unit.kind == "table":
-                self._insert_table(cursor, unit.rows, unit.box_fill)
+                self._insert_table(cursor, unit.rows, unit.box_fill, unit.bordered)
             else:
                 self._insert_segments(cursor, unit.segments)
+
+            # A unit containing newlines becomes SEVERAL Qt blocks — "\n"
+            # starts a new block, it does not wrap inside one. Formatting
+            # only the block the unit started in left every line after the
+            # first with default (left) alignment, which is why an Arabic
+            # paragraph had its opening line on the right and its
+            # continuation lines on the left.
+            if unit.kind != "table":
+                self._align_blocks_between(started_at, cursor.position(), unit.alignment, text)
+
+    def _align_blocks_between(self, start: int, end: int, alignment: str, text: str) -> None:
+        """Applies the unit's alignment to every block it produced."""
+        document = self._text_edit.document()
+        block = document.findBlock(start)
+        cursor = QTextCursor(document)
+        while block.isValid() and block.position() <= end:
+            cursor.setPosition(block.position())
+            self._apply_alignment(cursor, alignment, text)
+            block = block.next()
 
     @staticmethod
     def _apply_alignment(cursor: QTextCursor, alignment: str, text: str = "") -> None:
@@ -844,13 +954,22 @@ class MainWindow(QMainWindow):
         left where it belongs.
         """
         block_format = cursor.blockFormat()
+        right_to_left = _starts_right_to_left(text)
+
+        # Direction is set for EVERY block, centred ones included. Centring
+        # only says where the line sits; it does not say which way the line
+        # reads, and a centred block was previously left at the document
+        # default. Measured on a real page, that put the caption
+        # "صورة ( 1 )" under left-to-right rules, which reorders its
+        # bracketed number to the wrong side of the word.
+        block_format.setLayoutDirection(
+            Qt.LayoutDirection.RightToLeft if right_to_left else Qt.LayoutDirection.LeftToRight
+        )
         if alignment == "center":
             block_format.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        elif _is_majority_arabic(text):
-            block_format.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        elif right_to_left:
             block_format.setAlignment(Qt.AlignmentFlag.AlignRight)
         else:
-            block_format.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
             block_format.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignAbsolute)
         cursor.setBlockFormat(block_format)
 

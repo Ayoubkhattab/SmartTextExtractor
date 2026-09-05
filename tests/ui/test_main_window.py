@@ -13,13 +13,24 @@ import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QTextCursor
 
-from smart_text_extractor.core.models import Document, DocumentUnit, OcrResult, OcrStatus, SourceType, TextSegment
+from smart_text_extractor.core.models import (
+    Document,
+    DocumentUnit,
+    OcrResult,
+    OcrStatus,
+    SourceType,
+    TextSegment,
+    TextStyle,
+)
 from smart_text_extractor.scanner.models import ScannerDeviceInfo
 from smart_text_extractor.ui.main_window import (
     _HEADING_FONT_POINT_SIZE,
     _LOW_CONFIDENCE_COLOR,
     _VERY_LOW_CONFIDENCE_COLOR,
     MainWindow,
+    _bridge_highlight_gaps,
+    _highlight_of,
+    _starts_right_to_left,
 )
 
 
@@ -663,3 +674,171 @@ class TestBlockDirectionAndAlignment:
         for number in range(2):
             block_format = window._text_edit.document().findBlockByNumber(number).blockFormat()
             assert block_format.alignment() & horizontal, f"block {number} has no horizontal alignment"
+
+
+class TestBlockDirectionRule:
+    """The direction rule, checked against real line shapes lifted from the
+    three test documents. These are the cases that broke two earlier rules:
+    letter-majority (which sent an Arabic bullet listing English product
+    names to the left) and the strict UAX #9 first-strong-character rule
+    (which sent an Arabic heading opening with a bracketed English term to
+    the left)."""
+
+    @pytest.mark.parametrize(
+        ("text", "right_to_left"),
+        [
+            ("هذا الدليل موجّه لجميع الموظفين", True),
+            ("• الموظف العادي : ابدأ بقراءة أقسام Dashboard و Documents", True),
+            ("(Agile) الإطار المنهجي", True),
+            ("ETL/ELT بث/تدفق: Kafka / Redpanda / MQTT", True),
+            ("Storage Path and Custom Field", False),
+            ("Software Development Office", False),
+            ("2026", True),  # no letters at all: keep the page's own direction
+            ("", True),
+        ],
+    )
+    def test_direction_of_a_real_line(self, text: str, right_to_left: bool) -> None:
+        assert _starts_right_to_left(text) is right_to_left
+
+
+class TestContinuationLinesAndHighlights:
+    def test_every_block_a_unit_produces_starts_from_the_right(
+        self, qtbot, document, sample_image
+    ) -> None:
+        """The reported defect: a long Arabic paragraph wrapping onto a
+        second line had that line start from the LEFT. A "\n" inside a
+        segment makes a NEW Qt block, and a new block carries the
+        document's default alignment unless every one of them is set."""
+        units = [
+            DocumentUnit(
+                kind="paragraph",
+                segments=[TextSegment("سطر أول طويل\nوسطر ثانٍ يتبعه\nوثالث", 100.0)],
+            )
+        ]
+        window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+        blocks = window._text_edit.document().blockCount()
+        assert blocks >= 3, "the fixture must actually produce several blocks"
+        for number in range(3):
+            block_format = window._text_edit.document().findBlockByNumber(number).blockFormat()
+            assert block_format.alignment() & Qt.AlignmentFlag.AlignRight, f"block {number} is not right-aligned"
+            assert block_format.layoutDirection() == Qt.LayoutDirection.RightToLeft
+
+    def test_a_highlight_runs_unbroken_across_the_spaces_inside_it(self) -> None:
+        """A highlight is one rectangle drawn behind a phrase, but it
+        arrives attached to individual words; painting only the words drew
+        stripes with a white gap between each pair."""
+        pink = TextStyle(highlight="#ffd7e4")
+        segments = [
+            TextSegment("كلمة", 100.0, pink),
+            TextSegment(" ", None),
+            TextSegment("ثانية", 100.0, pink),
+        ]
+
+        bridged = _bridge_highlight_gaps(segments)
+
+        assert [_highlight_of(segment) for segment in bridged] == [pink.highlight] * 3
+
+    def test_a_space_at_the_edge_of_a_highlight_is_left_alone(self) -> None:
+        """Bridging must not extend the colour past where the page drew it."""
+        pink = TextStyle(highlight="#ffd7e4")
+        segments = [
+            TextSegment("ملوّنة", 100.0, pink),
+            TextSegment(" ", None),
+            TextSegment("عادية", 100.0),
+        ]
+
+        assert [_highlight_of(segment) for segment in _bridge_highlight_gaps(segments)] == [
+            pink.highlight,
+            None,
+            None,
+        ]
+
+    def test_two_different_highlights_are_not_joined(self) -> None:
+        segments = [
+            TextSegment("أولى", 100.0, TextStyle(highlight="#ffd7e4")),
+            TextSegment(" ", None),
+            TextSegment("ثانية", 100.0, TextStyle(highlight="#d7e4ff")),
+        ]
+
+        assert _highlight_of(_bridge_highlight_gaps(segments)[1]) is None
+
+
+class TestTableCellDirection:
+    """Table cells are the one path _render_document_units cannot reach —
+    it aligns the blocks a UNIT produced, and a table's text lives inside
+    cells outside that range. Measured on a real page, that left all 18
+    cell blocks of a staffing table starting from the left while the
+    paragraphs above them started from the right."""
+
+    def _cell_formats(self, window):
+        document = window._text_edit.document()
+        formats, block = [], document.begin()
+        while block.isValid():
+            if block.text().strip():
+                formats.append(block.blockFormat())
+            block = block.next()
+        return formats
+
+    def test_arabic_cells_start_from_the_right(self, qtbot, document, sample_image) -> None:
+        rows = [
+            [[TextSegment("الاسم", 100.0)], [TextSegment("الدور", 100.0)]],
+            [[TextSegment("قائد مكتب الخوادم", 100.0)], [TextSegment("مهندس", 100.0)]],
+        ]
+        units = [DocumentUnit(kind="table", rows=rows)]
+        window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+        formats = self._cell_formats(window)
+        assert len(formats) == 4
+        for index, block_format in enumerate(formats):
+            assert block_format.alignment() & Qt.AlignmentFlag.AlignRight, f"cell block {index} is not right-aligned"
+            assert block_format.layoutDirection() == Qt.LayoutDirection.RightToLeft
+
+    def test_a_cell_with_no_letters_follows_its_table(self, qtbot, document, sample_image) -> None:
+        """A cell holding only a number carries no direction of its own;
+        deciding it in isolation would set it against the column around
+        it, so the table's own text decides."""
+        rows = [
+            [[TextSegment("العدد", 100.0)], [TextSegment("12", 100.0)]],
+            [[TextSegment("الإجمالي", 100.0)], [TextSegment("7", 100.0)]],
+        ]
+        units = [DocumentUnit(kind="table", rows=rows)]
+        window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+        for block_format in self._cell_formats(window):
+            assert block_format.layoutDirection() == Qt.LayoutDirection.RightToLeft
+
+    def test_a_latin_table_still_reads_left_to_right(self, qtbot, document, sample_image) -> None:
+        rows = [
+            [[TextSegment("Name", 100.0)], [TextSegment("Role", 100.0)]],
+            [[TextSegment("Storage Path", 100.0)], [TextSegment("Engineer", 100.0)]],
+        ]
+        units = [DocumentUnit(kind="table", rows=rows)]
+        window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+        for block_format in self._cell_formats(window):
+            assert block_format.layoutDirection() == Qt.LayoutDirection.LeftToRight
+
+
+class TestCentredBlocksCarryADirection:
+    def test_a_centred_arabic_caption_is_still_right_to_left(self, qtbot, document, sample_image) -> None:
+        """Centring says where a line sits, not which way it reads. A
+        centred block was left at the document default, which put the real
+        caption "صورة ( 1 )" under left-to-right rules and reordered its
+        bracketed number to the wrong side of the word."""
+        units = [DocumentUnit(kind="paragraph", segments=[TextSegment("صورة ( 1 )", 100.0)], alignment="center")]
+        window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+        block_format = window._text_edit.document().firstBlock().blockFormat()
+
+        assert block_format.alignment() & Qt.AlignmentFlag.AlignHCenter
+        assert block_format.layoutDirection() == Qt.LayoutDirection.RightToLeft
+
+    def test_a_centred_latin_caption_reads_left_to_right(self, qtbot, document, sample_image) -> None:
+        units = [DocumentUnit(kind="paragraph", segments=[TextSegment("Figure ( 1 )", 100.0)], alignment="center")]
+        window = _open_page_with_document_units(qtbot, document, sample_image, units)
+
+        block_format = window._text_edit.document().firstBlock().blockFormat()
+
+        assert block_format.alignment() & Qt.AlignmentFlag.AlignHCenter
+        assert block_format.layoutDirection() == Qt.LayoutDirection.LeftToRight

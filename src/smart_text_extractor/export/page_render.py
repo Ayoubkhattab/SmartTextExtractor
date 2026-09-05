@@ -118,6 +118,21 @@ def _insert_text_that_fits(page, box, text, *, fontname, font_size, colour, alig
 _GRID_COLOUR = (0.6, 0.6, 0.6)
 
 
+def _cell_shade(cell: list[TextSegment]) -> str | None:
+    """The fill most of a cell's words sit on, or None if most sit on none.
+
+    A majority rather than the first match, for the same reason the panel
+    uses one: a header cell can hold a stray word the style index did not
+    place inside the drawn band, and one such word should neither decide
+    nor prevent the whole cell's colour.
+    """
+    fills = [segment.style.highlight for segment in cell if segment.style and segment.style.highlight]
+    words = [segment for segment in cell if segment.confidence is not None]
+    if not fills or len(fills) * 2 <= len(words):
+        return None
+    return max(set(fills), key=fills.count)
+
+
 def _draw_table(page, box, unit: DocumentUnit, fontname: str, render_dpi: int) -> None:
     """Lays the table's cells out across its own recorded box.
 
@@ -146,7 +161,18 @@ def _draw_table(page, box, unit: DocumentUnit, fontname: str, render_dpi: int) -
                 box.x0 + (visual_column + 1) * column_width,
                 box.y0 + (row_index + 1) * row_height,
             )
-            page.draw_rect(cell_box, color=_GRID_COLOUR, width=0.4)
+            # Reproduce how the page draws the table, not one fixed style:
+            # a table found by its stroked rules gets rules, and one
+            # recovered from shaded cells gets the shading instead.
+            # Drawing a grid over the second kind adds ink the source
+            # never had, which measured 34 points of visual similarity on
+            # a real page even though the structure was finally right.
+            if unit.bordered:
+                page.draw_rect(cell_box, color=_GRID_COLOUR, width=0.4)
+            else:
+                shade = _cell_shade(cell)
+                if shade:
+                    page.draw_rect(cell_box, color=None, fill=_hex_to_rgb(shade))
             text = _segments_text(cell)
             if text:
                 _insert_text_that_fits(

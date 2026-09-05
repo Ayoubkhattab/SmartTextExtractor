@@ -145,6 +145,7 @@ class DocumentUnit:
     bbox: Rect | None = None  # union of this unit's source words' positions on the page image (pixels, same space as OcrResult.word_boxes) — lets the hybrid OCR engine (ocr/hybrid_engine.py) crop exactly this region for a second pass; None only for a unit built without positional data (e.g. constructed directly by a test)
     alignment: str = "natural"  # "natural" (follow the text's own direction) | "center" — measured from where the unit actually sits in the page's text column, so a centred title stays centred in the output
     box_fill: str | None = None  # "#rrggbb" when this unit is a panel the page draws its content inside (ocr/layout_boxes.py), so the container is reproduced and not just its text
+    bordered: bool = True  # whether the source drew this table's RULES. A table whose grid was recovered from shaded cells rather than stroked lines (ocr/table_grid._grid_from_fills) has none, and drawing them adds ink the page never had — measured as a 34-point drop in visual similarity on a real page.
     space_before_points: float = 0.0  # blank vertical space above this unit on the source page, so the export keeps the same rhythm instead of collapsing everything to a uniform gap
 
 

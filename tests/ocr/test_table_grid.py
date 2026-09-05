@@ -115,3 +115,119 @@ class TestDetectTableGridsOnRealPages:
         """Measured false positive: the grid finder reports the pale band
         drawn behind a highlighted line as a 1-row, 4-column table."""
         assert self._grids(0) == []
+
+
+def _rect_grid(rows: int, columns: int, stroked: bool = True, x: int = 0, y: int = 0) -> TableGrid:
+    grid = _grid(rows, columns)
+    cells = [[Rect(cell.x + x, cell.y + y, cell.width, cell.height) for cell in row] for row in grid.cells]
+    bbox = Rect(x, y, grid.bbox.width, grid.bbox.height)
+    return TableGrid(bbox=bbox, cells=cells, stroked=stroked)
+
+
+class TestPreferRicherGrids:
+    """Neither reader wins outright — see _prefer_richer_grids."""
+
+    def test_a_fill_grid_replaces_the_fragment_it_contains(self) -> None:
+        from smart_text_extractor.ocr.table_grid import _prefer_richer_grids
+
+        fragment = _rect_grid(rows=5, columns=5)
+        whole = _rect_grid(rows=19, columns=5, stroked=False)
+        whole = TableGrid(bbox=Rect(0, 0, 500, 760), cells=whole.cells, stroked=False)
+
+        assert _prefer_richer_grids([fragment], [whole]) == [whole]
+
+    def test_a_stroked_grid_that_resolves_more_rows_is_kept(self) -> None:
+        """The opposite case, also measured: on a ruled page the stroked
+        reader returns 9x2 and 5x3 where the fill reader collapses both
+        into a single 3x3."""
+        from smart_text_extractor.ocr.table_grid import _prefer_richer_grids
+
+        stroked = [_rect_grid(rows=9, columns=2), _rect_grid(rows=5, columns=3)]
+        coarse = TableGrid(bbox=Rect(0, 0, 900, 900), cells=_rect_grid(3, 3).cells, stroked=False)
+
+        assert _prefer_richer_grids(stroked, [coarse]) == stroked
+
+    def test_an_uncontested_fill_grid_is_dropped_beside_a_stroked_one(self) -> None:
+        """Measured, and the opposite of what it looks like it should do:
+        letting a fill grid that contends with nothing be ADDED to a page
+        the stroked reader already read cost 2.5 points of visual
+        similarity on the ruled document, where it lays a coarse 3x3 over
+        a page already read as 9x2 and 5x3. Where the stroked reader found
+        nothing at all, the fill grid is still the only reading there is —
+        that is the case the test below covers."""
+        from smart_text_extractor.ocr.table_grid import _prefer_richer_grids
+
+        far_away = _rect_grid(rows=4, columns=2, x=2000, y=2000)
+        elsewhere = TableGrid(bbox=Rect(0, 0, 500, 760), cells=_rect_grid(19, 5).cells, stroked=False)
+
+        assert _prefer_richer_grids([far_away], [elsewhere]) == [far_away]
+
+    def test_a_fill_grid_stands_alone_where_no_rules_were_found(self) -> None:
+        from smart_text_extractor.ocr.table_grid import _prefer_richer_grids
+
+        whole = TableGrid(bbox=Rect(0, 0, 500, 760), cells=_rect_grid(19, 5).cells, stroked=False)
+
+        assert _prefer_richer_grids([], [whole]) == [whole]
+
+    def test_with_nothing_to_compare_each_source_stands_alone(self) -> None:
+        from smart_text_extractor.ocr.table_grid import _prefer_richer_grids
+
+        stroked = [_rect_grid(rows=3, columns=2)]
+        filled = [TableGrid(bbox=Rect(0, 0, 9, 9), cells=_rect_grid(3, 2).cells, stroked=False)]
+
+        assert _prefer_richer_grids(stroked, []) == stroked
+        assert _prefer_richer_grids([], filled) == filled
+
+
+def test_a_fill_derived_table_unit_is_not_bordered() -> None:
+    """The source draws this kind of table as shaded cells; drawing rules
+    over it adds ink the page never had."""
+    grid = TableGrid(bbox=_grid(2, 2).bbox, cells=_grid(2, 2).cells, stroked=False)
+
+    units, _ = build_table_units([grid], [_word("خلية", x=10, y=10)])
+
+    assert units[0].bordered is False
+
+
+def test_a_stroked_table_unit_keeps_its_rules() -> None:
+    units, _ = build_table_units([_grid(2, 2)], [_word("خلية", x=10, y=10)])
+
+    assert units[0].bordered is True
+
+
+@requires_real_pdf
+class TestFillDerivedGridOnRealPages:
+    """The page these numbers come from is drawn entirely with FILLS —
+    it reports zero strokes, so find_tables() reads only a 5x5 fragment of
+    a 19x5 staffing table and the other fourteen rows spilled out as 48
+    loose paragraphs."""
+
+    ORG_PDF = Path("docs/هيكلية القسم والمكاتب.pdf")
+
+    def _grids(self, page_index: int, pdf: Path | None = None):
+        import pymupdf
+
+        with pymupdf.open(str(pdf or self.ORG_PDF)) as document:
+            return detect_table_grids(document.load_page(page_index), render_dpi=300)
+
+    @pytest.mark.skipif(not Path("docs/هيكلية القسم والمكاتب.pdf").exists(), reason="document not in this checkout")
+    def test_the_whole_staffing_table_is_recovered(self) -> None:
+        grids = self._grids(11)
+
+        assert len(grids) == 1
+        assert len(grids[0].cells) == 19
+        assert len(grids[0].cells[0]) == 5
+        assert grids[0].stroked is False
+
+    @pytest.mark.skipif(not Path("docs/هيكلية القسم والمكاتب.pdf").exists(), reason="document not in this checkout")
+    def test_a_title_page_is_not_read_as_a_table(self) -> None:
+        """Both guards exist because the first version fired here: columns
+        are taken only from shaded cells, and a row boundary must be
+        witnessed across most of the table's width."""
+        assert self._grids(0) == []
+
+    def test_the_stroked_reader_still_wins_where_rules_are_drawn(self) -> None:
+        grids = self._grids(1, REAL_PDF)
+
+        assert [len(grid.cells) for grid in grids] == [9, 5]
+        assert all(grid.stroked for grid in grids)
